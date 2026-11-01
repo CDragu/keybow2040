@@ -114,3 +114,5 @@ material is shifted earlier by the stream's reported round-trip latency
 samples arrived; the synth's recording feed is delayed by the same amount
 (it needs no mic-path shift), keeping looped keys and looped strings in
 the same groove.
+
+with Cosmin Changes
