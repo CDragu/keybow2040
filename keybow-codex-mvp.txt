@@ -1,0 +1,104 @@
+Keybow Codex Windows Controller — MVP
+=====================================
+
+Goal
+----
+Build a Windows Keybow controller for Codex approvals.
+
+MVP scope
+---------
+
+- Keybow firmware exposes 16 button presses and programmable LEDs over USB
+  serial.
+- A Windows companion connects to the Keybow and launches a local Codex App
+  Server process.
+- The companion starts one Codex thread and sends a prompt from a minimal
+  on-screen text box.
+- LEDs show:
+  - Dim blue: idle / ready
+  - Pulsing amber: Codex is working
+  - Pulsing red: an approval decision is required
+  - Solid green: turn completed
+  - Solid red: turn failed or was declined
+- When Codex requests approval, the Windows app displays the command and its
+  reason.
+- Keybow keys approve or decline:
+  - Key 0: approve once
+  - Key 1: approve for this session
+  - Key 2: decline
+  - Key 3: cancel
+- The approval response is sent through the structured Codex App Server
+  protocol.
+- Completion LED stays visible until the next prompt or acknowledgement.
+
+Architecture
+------------
+
+Keybow buttons/LEDs <USB serial> Windows companion <JSON-RPC> Codex App Server
+
+Out of scope for the MVP
+------------------------
+
+- ChatGPT desktop-app integration or UI scraping.
+- Session switching.
+- Audio looping.
+- MIDI synth.
+- Multi-session management.
+
+Implementation order
+--------------------
+
+1. Define the interaction contract
+
+   Choose final LED colours, button assignments, and what "approve for
+   session" is allowed to mean. Approval must show the command on screen
+   before a Keybow button can approve it.
+
+2. Simplify and validate the Keybow firmware
+
+   Keep the existing serial protocol: LED commands, button presses, held-key
+   events, PING/PONG, and the disconnected-host indicator. Flash it to the
+   Keybow and test every key and LED on Windows.
+
+3. Create the Windows companion skeleton
+
+   Build a small Python app first. It should find the Keybow COM port,
+   reconnect after unplug/replug, and provide a minimal window or log panel.
+
+4. Connect to Codex App Server
+
+   Have the companion launch `codex app-server` locally and communicate over
+   JSON-RPC through standard input/output. Implement initialization, thread
+   creation, and turn submission.
+
+5. Implement status-to-LED updates
+
+   Consume turn lifecycle events:
+   - Turn begins: working.
+   - Approval request: approval needed.
+   - Turn completes: completed or failed.
+   - Keybow disconnect: app remains usable and reconnects.
+
+6. Implement safe approval controls
+
+   Handle command-execution approvals first: show command, location, and
+   reason; map the four Keybow keys to the permitted App Server decisions.
+   Guard every decision with its exact thread, turn, and request ID so an old
+   key press cannot approve a later command.
+
+7. Test realistic flows
+
+   Test read-only work, normal workspace edits, network approval,
+   decline/cancel, multiple sequential approvals, disconnect/reconnect,
+   failed turns, and interrupted turns.
+
+8. Package it for Windows
+
+   Add a launcher, dependency setup, configuration file, clear startup
+   instructions, and optional packaging as a single .exe.
+
+9. Add later features only after the MVP is solid
+
+   Multiple sessions/keys, session switching, richer on-device progress,
+   custom permission profiles, and the standalone MIDI synth can follow
+   independently.

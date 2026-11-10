@@ -1,0 +1,111 @@
+Target Hardware — Original 12-Key Keybow
+=========================================
+
+Target selection
+----------------
+
+This rewrite targets the original Pimoroni Keybow kit, not the Keybow 2040
+currently used by this repository.
+
+The original Keybow is a 3-column by 4-row macro pad with 12 individually
+illuminated mechanical keys. Its controller is a Raspberry Pi Zero WH fitted
+to the Keybow PCB's 40-pin GPIO header. The H in Zero WH means its GPIO
+header is pre-soldered.
+
+This is a materially different device from Keybow 2040:
+
+- Original Keybow: 12 keys (3 x 4), full Linux computer, Raspberry Pi Zero WH,
+  USB HID gadget capability.
+- Keybow 2040: 16 keys (4 x 4), RP2040 microcontroller, CircuitPython,
+  custom USB serial protocol.
+
+Original Keybow kit hardware
+----------------------------
+
+- 12 hot-swappable Kailh Speed mechanical switches and clear keycaps.
+- One programmable RGB LED under each key.
+- 3 x 4 physical key layout.
+- Keybow PCB and switch plate attach to the Pi's 40-pin GPIO header.
+- The Pi's micro-USB data port can operate as a USB HID gadget, allowing the
+  Keybow to appear to Windows as a keyboard.
+- A microSD card contains the operating system and our device software.
+
+Raspberry Pi Zero WH specification
+----------------------------------
+
+- SoC: Broadcom BCM2835.
+- CPU: 1 GHz, single-core, 32-bit ARM11.
+- Memory: 512 MB LPDDR2 RAM.
+- GPIO: pre-soldered 40-pin header.
+- Wireless: 2.4 GHz 802.11b/g/n Wi-Fi and Bluetooth 4.0 / BLE.
+- Storage: microSD card slot.
+- Ports: micro-USB power input, micro-USB USB On-The-Go data port, and
+  mini-HDMI.
+- Other connectors: CSI camera connector, composite-video and reset headers.
+
+Software architecture implications
+----------------------------------
+
+The Pi can run the Keybow device service directly. Unlike Keybow 2040, it is
+not a microcontroller that needs CircuitPython firmware or USB serial to a
+host PC.
+
+Proposed split:
+
+1. Keybow Pi service
+
+   - Reads the 12 physical keys and drives the 12 RGB LEDs through the Keybow
+     hardware.
+   - Presents as a USB HID keyboard to the attached Windows PC when needed.
+   - Maintains a local network connection to the Windows companion.
+   - Sends key actions to Windows and receives LED-state updates.
+
+2. Windows companion
+
+   - Runs Codex App Server and owns Codex thread and approval state.
+   - Displays the exact command, working directory, and reason when approval
+     is requested.
+   - Maps Keybow button actions to approve once, approve for session, decline,
+     and cancel.
+   - Sends the resulting LED state to the Keybow Pi over the local network.
+
+Connection model
+----------------
+
+The Keybow's USB cable may be used for HID keyboard input and power. The Pi
+uses Wi-Fi to communicate with the Windows companion. If Wi-Fi is unsuitable,
+a USB Ethernet gadget or another direct network link can be evaluated later.
+
+MVP key-layout proposal (12 keys)
+---------------------------------
+
+Top row:
+  [0] Approve once       [1] Approve for session  [2] Decline
+
+Second row:
+  [3] Cancel             [4] Acknowledge complete [5] Reserved
+
+Remaining six keys:
+  Reserved for future session selection, task controls, or synth controls.
+
+Open hardware checks before implementation
+------------------------------------------
+
+- Confirm the actual kit contains a Raspberry Pi Zero WH rather than a
+  substituted Pi Zero W or Zero 2 W.
+- Confirm the Windows PC and Keybow Pi can reach each other on the same
+  trusted local network.
+- Confirm that USB HID gadget mode is required for the desired workflow; the
+  Codex approval MVP can send button events over Wi-Fi and does not require
+  simulated keyboard keystrokes.
+- Choose the Pi OS base: retain/adapt the original lightweight Keybow OS, or
+  use Raspberry Pi OS Lite with a maintained Python service.
+
+References consulted
+--------------------
+
+- Pimoroni Keybow setup guide: original Keybow OS runs on the included
+  Raspberry Pi Zero WH and uses Lua plus USB HID setup.
+- Raspberry Pi Zero documentation: Zero WH uses BCM2835, 512 MB RAM, a
+  pre-soldered 40-pin header, Wi-Fi, Bluetooth, microSD, micro-USB OTG, and
+  micro-USB power.
