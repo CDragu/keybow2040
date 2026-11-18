@@ -4,13 +4,16 @@ Only the local Codex CLI is launched. The main Qt thread owns SessionController;
 reader threads only put messages in a queue, drained by the GUI timer.
 """
 from collections import deque
+from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
 import queue
 import shutil
+import sqlite3
 import subprocess
 import threading
+import time
 
 from desktop.core import ApprovalRequest, Phase
 
@@ -21,6 +24,22 @@ APPROVAL_METHODS = {
 TO_WIRE = {"once": "accept", "session": "acceptForSession", "decline": "decline"}
 FROM_WIRE = {value: key for key, value in TO_WIRE.items()}
 MAX_LINE = 2_000_000
+
+
+APPROVAL_TIMEOUT = 120
+MAX_PENDING_REQUESTS = 16
+
+
+@dataclass(frozen=True)
+class ApprovalBinding:
+    token: str
+    generation: int
+    thread_id: str
+    turn_id: str
+    item_id: str
+    rpc_id: str | int
+    kind: str
+    expires_at: float
 
 
 class CodexUnavailable(RuntimeError):
@@ -143,6 +162,10 @@ def _id(value):
     return str(value) if isinstance(value, (str, int)) and not isinstance(value, bool) else ""
 
 
+def _text(value):
+    return value if isinstance(value, str) and value.strip() else ""
+
+
 def _allowed(params, method):
     """Never offer a permission not described by the server."""
     explicit = params.get("availableDecisions")
@@ -154,8 +177,6 @@ def _allowed(params, method):
         for item in explicit:
             if isinstance(item, str):
                 wire_choices.add(item)
-            elif isinstance(item, dict):
-                wire_choices.add(item.get("type", ""))
         choices = tuple(x for x in ("once", "session", "decline")
                         if TO_WIRE[x] in wire_choices)
     if params.get("kind") == "humanCommand":
@@ -172,8 +193,12 @@ class CodexBackend:
     Call .poll() regularly from Qt's event loop; NEVER call it from a worker.
     """
 
-    def __init__(self, session, command=None, process_factory=JsonRpcProcess):
+    def __init__(self, session, command=None, process_factory=JsonRpcProcess,
+                 audit=None, clock=time.monotonic):
         self.session = session
+        self.audit = audit
+        self.clock = clock
+        self.session_locked = False
         self.command = command
         self.process_factory = process_factory
         self.transport = None
@@ -182,7 +207,8 @@ class CodexBackend:
         self.thread_project = None
         self.turn_id = None
         self.generation = 0
-        self.active_approval = None  # (token, original rpc ID, thread, turn, item)
+        self.active_approval = None
+        self.seen_request_ids = set()
         self.pending_early = []
         self.items = {}
         self.sandbox = "read-only"
@@ -210,6 +236,7 @@ class CodexBackend:
         self.active_approval = None
         self.pending_early.clear()
         self.items.clear()
+        self.seen_request_ids.clear()
         self.last_error = ""
         try:
             if self.transport is None:
@@ -275,6 +302,9 @@ class CodexBackend:
             except (CodexUnavailable, OSError, ValueError, KeyError, TypeError) as exc:
                 self._fail(f"Codex protocol error: {exc}")
                 break
+        pending = self.active_approval
+        if pending and self.clock() >= pending.expires_at:
+            self._invalidate("expired", reply="decline")
 
     def _handle(self, msg):
         if msg.get("_closed") or msg.get("_transport_error"):
@@ -333,10 +363,15 @@ class CodexBackend:
     def _notification(self, method, params):
         thread = params.get("threadId")
         if method == "serverRequest/resolved":
-            if self.active_approval and thread == self.active_approval[2]:
-                if _id(params.get("requestId")) == _id(self.active_approval[1]):
-                    self.active_approval = None
-                    self.session.clear_approval()
+            rpc_id = params.get("requestId")
+            pending = self.active_approval
+            if (pending and thread == pending.thread_id
+                    and type(rpc_id) is type(pending.rpc_id)
+                    and rpc_id == pending.rpc_id):
+                self._invalidate("resolved")
+            if thread == self.thread_id and _id(rpc_id):
+                self.pending_early = [(msg, deadline) for msg, deadline in self.pending_early
+                                      if (type(msg["id"]), msg["id"]) != (type(rpc_id), rpc_id)]
             return
         if method == "error" and thread == self.thread_id:
             err = params.get("error") or {}
@@ -357,15 +392,14 @@ class CodexBackend:
         if method == "turn/completed":
             turn = params.get("turn") or {}
             finished_id = _id(turn.get("id"))
-            if (not finished_id or finished_id in self.finished_turns or
+            if (not self.inflight or not finished_id or finished_id in self.finished_turns or
                     (self.turn_id and finished_id != self.turn_id)):
                 return
             self.finished_turns.add(finished_id)
             status = turn.get("status", "failed")
             self.inflight = False
-            self.active_approval = None
+            self._invalidate("turn ended")
             self.pending_early.clear()
-            self.session.clear_approval()
             if status == "interrupted":
                 self.session.cancel()
             elif self.session.phase == Phase.WORKING:
@@ -399,134 +433,202 @@ class CodexBackend:
     def _server_request(self, msg):
         rpc_id = msg.get("id")
         method = msg.get("method")
-        params = msg.get("params") or {}
+        params = msg.get("params")
+        if not _id(rpc_id):
+            return  # malformed ID cannot be used for a response
+        request_key = (type(rpc_id), rpc_id)
+        if request_key in self.seen_request_ids:
+            # An ambiguous duplicate must not receive the active decision.
+            if (self.active_approval and request_key == (
+                    type(self.active_approval.rpc_id), self.active_approval.rpc_id)
+                    or any((type(queued["id"]), queued["id"]) == request_key
+                           for queued, _ in self.pending_early)):
+                self._fail("Codex sent a duplicate pending request ID.")
+            return
+        self.seen_request_ids.add(request_key)
         if not isinstance(params, dict):
             self.transport.reject(rpc_id, message="Malformed request parameters")
             return
         if method not in APPROVAL_METHODS:
-            self.transport.reject(rpc_id, message=f"Unsupported request: {method}")
-            self.session._emit(f"Unsupported Codex request safely rejected: {method}")
+            self.transport.reject(rpc_id, message="Unsupported Codex request")
+            self.session._emit("Unsupported Codex request safely rejected.")
             return
-        if (not self.thread_id or params.get("threadId") != self.thread_id
+        if (self.session_locked or not self.inflight or not self.thread_id
+                or params.get("threadId") != self.thread_id
                 or not _id(params.get("turnId")) or not _id(params.get("itemId"))
                 or self.session.phase not in (Phase.WORKING, Phase.APPROVAL)):
             self.transport.respond(rpc_id, {"decision": "decline"})
             return
-        if not self.turn_id:
-            self.pending_early.append(msg)
+        deadline = self.clock() + APPROVAL_TIMEOUT
+        if not self.turn_id and len(self.pending_early) < MAX_PENDING_REQUESTS:
+            self.pending_early.append((msg, deadline))
             return
-        self._show_request(msg)
+        self._show_request(msg, deadline)
 
     def _drain_early(self):
         waiting, self.pending_early = self.pending_early, []
-        for message in waiting:
-            self._show_request(message)
+        for msg, deadline in waiting:
+            self._show_request(msg, deadline)
 
-    def _show_request(self, msg):
+    def _show_request(self, msg, deadline):
         rpc_id = msg["id"]
-        params = msg.get("params") or {}
-        if (self.session.phase != Phase.WORKING or self.active_approval
-                or params.get("threadId") != self.thread_id
+        params = msg["params"]
+        if (self.session_locked or self.clock() >= deadline
+                or self.session.phase != Phase.WORKING or self.active_approval
+                or params.get("threadId") != self.thread_id or not self.turn_id
                 or _id(params.get("turnId")) != self.turn_id):
             self.transport.respond(rpc_id, {"decision": "decline"})
             return
-        item_id = _id(params.get("itemId"))
+        item_id = _id(params["itemId"])
         method = msg["method"]
-        item = self.items.get(item_id) or {}
-        command = str(params.get("command") or item.get("command") or "")
-        cwd = str(params.get("cwd") or item.get("cwd") or self.session.project)
-        reason = str(params.get("reason") or "No reason provided.")
-        details = ""
+        item = self.items.get(item_id, {})
         network = params.get("networkApprovalContext")
-        if isinstance(network, dict):
-            details = (f"Network access: {network.get('protocol', '?')}://"
-                       f"{network.get('host', '?')}"
-                       + (f":{network['port']}" if network.get("port") else ""))
-            command = ""  # not a general shell-command approval
+        command = ""
+        cwd = _text(params.get("cwd"))
+        if not cwd and item.get("type") == "commandExecution":
+            cwd = _text(item.get("cwd"))
+        valid = False
+        kind = APPROVAL_METHODS[method]
+        if network is not None:
+            kind = "Network access"
+            host = _text(network.get("host")) if isinstance(network, dict) else ""
+            protocol = _text(network.get("protocol")) if isinstance(network, dict) else ""
+            port = network.get("port") if isinstance(network, dict) else None
+            valid = (method == "item/commandExecution/requestApproval" and host
+                     and protocol and (port is None or type(port) is int and 0 < port <= 65535))
+            details = (f"Network access: {protocol} to {host}"
+                       + (f" on port {port}" if port is not None else "")
+                       if valid else "Network destination is unavailable.")
         elif method == "item/fileChange/requestApproval":
-            changes = item.get("changes") or []
-            if changes:
-                details = "\n".join(
-                    f"{c.get('kind', 'edit')}: {c.get('path', '?')}\n"
-                    + str(c.get("diff") or "")[:3000]
-                    for c in changes[:20] if isinstance(c, dict))
-            else:
-                details = "File change details are unavailable."
+            changes = item.get("changes")
+            valid = (item.get("type") == "fileChange" and isinstance(changes, list)
+                     and bool(changes) and all(isinstance(change, dict)
+                     and _text(change.get("path")) and isinstance(change.get("diff"), str)
+                     for change in changes))
+            details = ("\n\n".join(
+                f"{change.get('kind', 'edit')}: {change['path']}\n{change['diff']}"
+                for change in changes) if valid else "File change details are unavailable.")
             if params.get("grantRoot"):
                 details += f"\nRequested grant root: {params['grantRoot']}"
         else:
-            details = (str(params.get("additionalPermissions") or "")
-                       if params.get("additionalPermissions") else
-                       "Execute this command within the selected project.")
+            command = _text(params.get("command"))
+            if not command and item.get("type") == "commandExecution":
+                command = _text(item.get("command"))
+            valid = bool(command and cwd)
+            permissions = params.get("additionalPermissions")
+            details = (json.dumps(permissions, ensure_ascii=False) if permissions
+                       else "Command execution request.")
+            if params.get("commandActions"):
+                details += "\n" + json.dumps(params["commandActions"], ensure_ascii=False)
         allowed = _allowed(params, method)
-        if not (command or (network and details) or
-                (method == "item/fileChange/requestApproval" and
-                 item.get("changes"))):
+        if not valid:
             allowed = ("decline",)
-            details += "\nApproval is disabled because the action preview is unavailable."
-        token = f"{self.generation}:{rpc_id}"
-        request = ApprovalRequest(
-            request_id=token,
-            kind=APPROVAL_METHODS[method] if not network else "Network access",
-            description=details,
-            cwd=cwd, reason=reason, command=command, allowed=allowed,
-        )
-        if not self.session.request_approval(request):
+            details += "\nApproval is disabled because the action preview is incomplete."
+        # repr preserves the distinction between JSON integer and string IDs.
+        token = f"{self.generation}:{rpc_id!r}"
+        binding = ApprovalBinding(token, self.generation, self.thread_id, self.turn_id,
+                                  item_id, rpc_id, kind, deadline)
+        if not self._audit(binding, "requested", "server"):
             self.transport.respond(rpc_id, {"decision": "decline"})
             return
-        self.active_approval = (token, rpc_id, self.thread_id, self.turn_id, item_id)
+        self.active_approval = binding
+        request = ApprovalRequest(token, kind, details, cwd or "Unavailable",
+                                  _text(params.get("reason")) or "No reason provided.",
+                                  command, allowed)
+        if not self.session.request_approval(request):
+            self._invalidate("not displayed", reply="decline")
 
-    def decide(self, decision, run_id, request_token):
+    def decide(self, decision, run_id, request_token, source="desktop", guard=None):
+        # Consume queued lifecycle events before accepting any UI/Pi input.
+        self.poll()
         pending = self.active_approval
-        if (not pending or pending[0] != request_token or
-                self.turn_id != pending[3] or self.thread_id != pending[2] or
-                not self.session.can_decide(decision, run_id, request_token)):
+        if (not pending or self.session_locked or pending.token != request_token
+                or pending.generation != self.generation
+                or pending.turn_id != self.turn_id or pending.thread_id != self.thread_id
+                or not self.transport.events.empty()
+                or self.clock() >= pending.expires_at
+                or not self.session.can_decide(decision, run_id, request_token)):
             return False
-        # Always reply to the exact server request ID. Never retry an approval
-        # response against a new connection; fail closed on write errors.
+        if not self._audit(pending, "decision attempted", source, decision):
+            self._invalidate("audit unavailable", reply="decline")
+            return False
+        if (not self.transport.events.empty() or self.clock() >= pending.expires_at
+                or guard is not None and not guard()):
+            return False
         try:
-            self.transport.respond(pending[1], {"decision": TO_WIRE[decision]})
+            self.transport.respond(pending.rpc_id, {"decision": TO_WIRE[decision]})
         except (CodexUnavailable, OSError) as exc:
             self._fail(str(exc))
             return False
         self.active_approval = None
+        self._audit(pending, "decision sent", source, decision)
         self.session.decide(decision, run_id, request_token, continue_on_decline=True)
         return True
 
-    def cancel(self):
+    def _audit(self, pending, event, source, decision=None):
+        if self.audit is None:
+            return True
+        try:
+            self.audit.record(pending, event, source, decision)
+        except (OSError, sqlite3.Error):
+            self.session._emit("Approval audit could not be written.")
+            return False
+        return True
+
+    def _invalidate(self, reason, reply=None, source="system"):
+        pending, self.active_approval = self.active_approval, None
+        if not pending:
+            return
+        self._audit(pending, reason, source)
+        self.session.clear_approval()
+        if reply and self.transport:
+            try:
+                self.transport.respond(pending.rpc_id, {"decision": reply})
+            except (CodexUnavailable, OSError) as exc:
+                self._fail(str(exc))
+                return
+            self._audit(pending, "decision sent", source, reply)
+
+    def set_session_locked(self, locked):
+        self.session_locked = locked
+        if locked:
+            waiting, self.pending_early = self.pending_early, []
+            self._invalidate("Windows session locked", reply="decline")
+            for msg, _ in waiting:
+                if self.transport:
+                    try:
+                        self.transport.respond(msg["id"], {"decision": "decline"})
+                    except (CodexUnavailable, OSError) as exc:
+                        self._fail(str(exc))
+                        break
+
+    def cancel(self, source="desktop"):
+        self.poll()
         if self.session.phase not in (Phase.WORKING, Phase.APPROVAL):
             return False
-        if self.active_approval and self.transport:
-            try:
-                self.transport.respond(self.active_approval[1], {"decision": "cancel"})
-            except (CodexUnavailable, OSError):
-                pass
-        self.active_approval = None
-        self.pending_early.clear()
+        waiting, self.pending_early = self.pending_early, []
+        self._invalidate("turn cancelled", reply="cancel", source=source)
         self.session.cancel()
-        if self.transport and self.thread_id and self.turn_id:
+        if self.transport:
             try:
-                self._send("turn/interrupt", {"threadId": self.thread_id,
-                                               "turnId": self.turn_id}, "turn/interrupt")
+                for msg, _ in waiting:
+                    self.transport.respond(msg["id"], {"decision": "cancel"})
+                if self.thread_id and self.turn_id and self.inflight:
+                    self._send("turn/interrupt", {"threadId": self.thread_id,
+                                                   "turnId": self.turn_id}, "turn/interrupt")
             except (CodexUnavailable, OSError):
                 self.close()
         return True
 
     def _fail(self, message):
         self.last_error = message
-        self.inflight = False
-        self.active_approval = None
-        self.pending_early.clear()
-        self.callbacks.clear()
-        if self.session.phase == Phase.APPROVAL:
-            self.session.clear_approval()
-        if self.session.phase == Phase.WORKING:
-            self.session.complete(False, message)
-        else:
+        self._invalidate("server disconnected")
+        if not self.session.complete(False, message):
             self.session._emit(message)
         self.close()
 
     def close(self):
+        self._invalidate("server closed")
         if self.transport:
             self.transport.close()
             self.transport = None
@@ -534,4 +636,6 @@ class CodexBackend:
         self.thread_id = None
         self.thread_project = None
         self.turn_id = None
-        self.active_approval = None
+        self.inflight = False
+        self.pending_early.clear()
+        self.finished_turns.clear()

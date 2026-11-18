@@ -1,9 +1,13 @@
 """Backend protocol tests use a fake process, not the real Codex CLI."""
+from contextlib import closing
 import queue
+import sqlite3
+import tempfile
 import unittest
 from pathlib import Path
 
-from desktop.codex_backend import CodexBackend, JsonRpcProcess, _allowed
+from desktop.audit import ApprovalAudit
+from desktop.codex_backend import APPROVAL_TIMEOUT, CodexBackend, _allowed
 from desktop.core import Phase, SessionController
 
 
@@ -218,6 +222,84 @@ class BackendTests(unittest.TestCase):
                       command="misleading shell")
         self.assertEqual(self.session.request.command, "")
         self.assertIn("example.com", self.session.request.description)
+
+    def test_sequential_requests_keep_exact_rpc_id_type_and_detect_replay(self):
+        self.ready_turn()
+        self.approval(55)
+        first = self.session.request.request_id
+        self.session.mark_presented(1, first)
+        self.assertTrue(self.backend.decide("once", 1, first))
+        self.approval("55")
+        second = self.session.request.request_id
+        self.session.mark_presented(1, second)
+        self.assertFalse(self.backend.decide("once", 1, first))
+        self.assertTrue(self.backend.decide("session", 1, second))
+        self.approval(55)
+        self.assertIsNone(self.session.request)
+        self.assertEqual(self.wire.responses,
+                         [(55, {"decision": "accept"}), ("55", {"decision": "acceptForSession"})])
+
+    def test_queued_resolution_wins_over_a_click(self):
+        self.ready_turn()
+        self.approval()
+        token = self.session.request.request_id
+        self.session.mark_presented(1, token)
+        self.wire.feed({"method": "serverRequest/resolved", "params": {
+            "threadId": "thr-test", "requestId": 55}})
+        self.assertFalse(self.backend.decide("once", 1, token))
+        self.assertEqual(self.wire.responses, [])
+
+    def test_timeout_declines_original_request_and_disables_old_token(self):
+        self.ready_turn()
+        self.backend.clock = lambda: 0
+        self.approval()
+        token = self.session.request.request_id
+        self.session.mark_presented(1, token)
+        self.backend.clock = lambda: APPROVAL_TIMEOUT
+        self.assertFalse(self.backend.decide("once", 1, token))
+        self.assertEqual(self.wire.responses, [(55, {"decision": "decline"})])
+
+    def test_lock_declines_pending_and_new_requests_until_unlock(self):
+        self.ready_turn()
+        self.approval()
+        token = self.session.request.request_id
+        self.session.mark_presented(1, token)
+        self.backend.set_session_locked(True)
+        self.approval(56)
+        self.backend.set_session_locked(False)
+        self.assertFalse(self.backend.decide("once", 1, token))
+        self.assertEqual(self.wire.responses,
+                         [(55, {"decision": "decline"}), (56, {"decision": "decline"})])
+
+    def test_audit_records_binding_and_source_without_review_contents(self):
+        self.ready_turn()
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "audit.db"
+            self.backend.audit = ApprovalAudit(path)
+            self.approval(55, command="test secret-command", reason="secret-reason")
+            token = self.session.request.request_id
+            self.session.mark_presented(1, token)
+            self.assertTrue(self.backend.decide("once", 1, token, source="Pi"))
+            with closing(sqlite3.connect(path)) as db:
+                rows = db.execute("""
+                    SELECT generation, thread_id, turn_id, item_id, rpc_id, event, source, decision
+                    FROM approval_events ORDER BY id
+                """).fetchall()
+            self.assertEqual(rows, [
+                (1, "thr-test", "turn-1", "item-1", 55, "requested", "server", None),
+                (1, "thr-test", "turn-1", "item-1", 55, "decision attempted", "Pi", "once"),
+                (1, "thr-test", "turn-1", "item-1", 55, "decision sent", "Pi", "once"),
+            ])
+            self.assertNotIn(b"secret-command", path.read_bytes())
+            self.assertNotIn(b"secret-reason", path.read_bytes())
+
+    def test_audit_failure_declines_request(self):
+        self.ready_turn()
+        with tempfile.TemporaryDirectory() as folder:
+            self.backend.audit = ApprovalAudit(folder)
+            self.approval()
+            self.assertIsNone(self.session.request)
+            self.assertEqual(self.wire.responses, [(55, {"decision": "decline"})])
 
     def tearDown(self):
         self.backend.close()

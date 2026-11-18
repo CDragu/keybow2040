@@ -28,6 +28,10 @@ class KeybowServer:
         self.connected = False
         self.running = False
 
+    @property
+    def connection_epoch(self):
+        return self._epoch if self.connected and not self._stop.is_set() else 0
+
     def start(self):
         if self.running:
             return
@@ -121,7 +125,7 @@ class KeybowServer:
                             (arm is not None and (not isinstance(arm, str) or
                                                   len(arm) > 80))):
                         raise ProtocolError("Invalid key event.")
-                    self._emit(("key", epoch, index, pressed, arm))
+                    self._emit(("key", epoch, index, pressed, arm, time.monotonic()))
                 elif kind == "snapshot":
                     keys = body.get("held")
                     if (not isinstance(keys, list) or len(keys) > 12 or
