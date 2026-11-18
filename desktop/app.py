@@ -88,6 +88,8 @@ class MainWindow(QMainWindow):
         self.keybow_server = KeybowServer()
         self._physical_epoch = 0
         self._physical_held = set()
+        self._pending_physical = None
+        self._ambiguous_chord = False
         self._virtual_held = set()
         self._physical_arm = None
         self._physical_arm_identity = None
@@ -527,6 +529,8 @@ class MainWindow(QMainWindow):
             self.keybow_server.close()
             self._physical_epoch = 0
             self._physical_held.clear()
+            self._pending_physical = None
+            self._ambiguous_chord = False
             self._physical_arm = None
             self._physical_arm_identity = None
             self._update_visual_holds()
@@ -554,6 +558,8 @@ class MainWindow(QMainWindow):
             if kind == "connected" and self.keybow_server.running:
                 self._physical_epoch = event[1]
                 self._physical_held.clear()
+                self._pending_physical = None
+                self._ambiguous_chord = False
                 self._physical_arm = None
                 self._physical_arm_identity = None
                 self._update_visual_holds()
@@ -561,6 +567,8 @@ class MainWindow(QMainWindow):
             elif kind == "disconnected" and event[1] == self._physical_epoch:
                 self._physical_epoch = 0
                 self._physical_held.clear()
+                self._pending_physical = None
+                self._ambiguous_chord = False
                 self._physical_arm = None
                 self._physical_arm_identity = None
                 self._update_visual_holds()
@@ -579,20 +587,36 @@ class MainWindow(QMainWindow):
                     self._physical_held.discard(index)
                 self._update_visual_holds()
                 if not pressed:
+                    if (index in (0, 1, 2) and self._ambiguous_chord
+                            and not (self._physical_held & {0, 1, 2})):
+                        self._ambiguous_chord = False
                     continue
                 if index in (0, 1, 2):
                     identity = self._physical_arm_identity
-                    if (self.keybow_server.connected and identity is not None
-                            and arm is not None and
-                            arm == self._physical_arm and
-                            identity[:2] == self._shown_key and
-                            identity[2] == self._physical_epoch and
-                            self.session.presented == self._shown_key and
-                            self.isVisible() and not self.isMinimized() and
-                            self.isActiveWindow()):
-                        self.press_virtual(index)
-                elif index in (3, 4):
+                    valid = (
+                        self.keybow_server.connected and identity is not None
+                        and arm is not None and arm == self._physical_arm
+                        and identity[:2] == self._shown_key
+                        and identity[2] == self._physical_epoch
+                        and self.session.presented == self._shown_key
+                        and self.isVisible() and not self.isMinimized()
+                        and self.isActiveWindow()
+                    )
+                    if (self._pending_physical is not None or
+                            len(self._physical_held & {0, 1, 2}) > 1):
+                        # Ambiguous chord: never let arrival order select the
+                        # approval. Release all approval keys and try again.
+                        self._pending_physical = None
+                        self._ambiguous_chord = True
+                    elif valid and not self._ambiguous_chord:
+                        self._pending_physical = (
+                            index, arm, identity, time.monotonic())
+                elif index == 3:
+                    self._pending_physical = None  # cancel takes precedence
                     self.press_virtual(index)
+                elif index == 4:
+                    self.press_virtual(index)
+        self._commit_physical_pending()
         self._sync_link()
         if hasattr(self, "device_status"):
             if not self.keybow_server.running:
@@ -609,6 +633,24 @@ class MainWindow(QMainWindow):
                 "Disable physical Pi link" if self.keybow_server.running
                 else "Enable physical Pi link")
 
+
+    def _commit_physical_pending(self):
+        candidate = self._pending_physical
+        if candidate is None or time.monotonic() - candidate[3] < 0.09:
+            return
+        self._pending_physical = None
+        index, arm, identity, _started = candidate
+        if (not self._ambiguous_chord and
+                self.keybow_server.connected and
+                identity == self._physical_arm_identity and
+                arm == self._physical_arm and
+                self.session.presented == self._shown_key and
+                self.session.phase == Phase.APPROVAL and
+                len(self._physical_held & {0, 1, 2}) <= 1 and
+                self.isVisible() and not self.isMinimized() and
+                self.isActiveWindow()):
+            self.press_virtual(index)
+
     def _sync_link(self):
         if not self.keybow_server.running:
             return
@@ -623,6 +665,8 @@ class MainWindow(QMainWindow):
                 and self.isActiveWindow()):
             identity = (*self._shown_key, self._physical_epoch)
         if identity != self._physical_arm_identity:
+            self._pending_physical = None
+            self._ambiguous_chord = False
             self._physical_arm_identity = identity
             self._physical_arm = secrets.token_hex(16) if identity else None
         self.keybow_server.publish(
