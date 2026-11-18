@@ -4,7 +4,7 @@ This is a **new, separate** Raspberry Pi Zero WH experiment. The existing
 `firmware/code.py` targets the 16-key RP2040 Keybow 2040 and is unchanged.
 
 This first milestone checks all **12 switches** and their **12 RGB LEDs**.
-It does **not** connect to Windows or approve Codex actions yet.
+This is the standalone **diagnostic**. For the new authenticated Pi–Windows bridge and shared RGB effects, see [pi/bridge.py](bridge.py) and [D2 pairing instructions](../docs/keybow-pairing.md).
 
 ## Hardware and OS
 
@@ -29,7 +29,7 @@ sudo usermod -aG gpio,spi "$USER"  # log out and back in for group changes
 
 git clone https://github.com/CDragu/keybow2040.git
 cd keybow2040
-git checkout feature/pi-keybow-diagnostics-windows-plan
+git switch main
 python3 -m venv --system-site-packages .venv
 .venv/bin/python -m pip install keybow==0.0.3
 ```
@@ -89,7 +89,4 @@ Stop with `sudo systemctl disable --now "keybow-diag@$USER.service"`.
 
 ## What follows
 
-Next: a versioned Pi–Windows protocol, authenticated pairing, LED state
-updates from the desktop, reconnection, and a host-offline indicator. The Pi
-should send only physical key events — **no local approval decisions**. See
-[`docs/windows-app-plan.md`](../docs/windows-app-plan.md).
+**D2 bridge implemented (hardware validation pending).** Run the new bridge only after the 12-key diagnostic succeeds. The Pi sends physical key events but makes **no local Codex approval decisions**. See [D2 pairing](../docs/keybow-pairing.md) and [the Windows roadmap](../docs/windows-app-plan.md).

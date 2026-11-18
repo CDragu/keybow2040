@@ -2,7 +2,8 @@
 
 Run from repository root: python -m desktop
 """
-import math
+import queue
+import secrets
 import sys
 import time
 from pathlib import Path
@@ -12,13 +13,15 @@ from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QFileDialog, QFrame,
     QGridLayout, QHBoxLayout, QLabel, QListWidget, QMainWindow,
-    QMenu, QPlainTextEdit, QPushButton, QSystemTrayIcon, QVBoxLayout,
+    QMenu, QMessageBox, QPlainTextEdit, QPushButton, QSystemTrayIcon, QVBoxLayout,
     QWidget,
 )
 
 from desktop.core import KEY_LABELS, TERMINAL, Phase, SessionController
 from desktop.codex_backend import CodexBackend
 from desktop.simulator import SCENARIOS, SimulatedCodex
+from desktop.pi_server import KeybowServer
+from keybow_net.effects import LightEngine
 
 
 STYLE = """
@@ -82,6 +85,18 @@ class MainWindow(QMainWindow):
         self.backend = SimulatedCodex(self.session)
         self.real_backend = CodexBackend(self.session)
         self.mode = "simulator"
+        self.keybow_server = KeybowServer()
+        self._physical_epoch = 0
+        self._physical_held = set()
+        self._pending_physical = None
+        self._ambiguous_chord = False
+        self._virtual_held = set()
+        self._physical_arm = None
+        self._physical_arm_identity = None
+        self._cue = None
+        self._cue_id = 0
+        self._last_link_error = ""
+        self.lights = LightEngine(time.monotonic())
         self.session.subscribe(self.render)
         self._shown_key = None
         self._last_history_count = 0
@@ -101,6 +116,10 @@ class MainWindow(QMainWindow):
         self.codex_timer.setInterval(40)
         self.codex_timer.timeout.connect(self.real_backend.poll)
         self.codex_timer.start()
+        self.link_timer = QTimer(self)
+        self.link_timer.setInterval(40)
+        self.link_timer.timeout.connect(self._poll_link)
+        self.link_timer.start()
 
     def _build(self):
         root = QWidget()
@@ -254,11 +273,17 @@ class MainWindow(QMainWindow):
                 key.setMinimumHeight(82)
                 key.setToolTip(f"Virtual Keybow key {index}: {key_name}")
                 key.clicked.connect(lambda _checked=False, n=index: self.press_virtual(n))
+                key.pressed.connect(lambda n=index: self._virtual_edge(n, True))
+                key.released.connect(lambda n=index: self._virtual_edge(n, False))
                 keys.addWidget(key, row, col)
                 self.virtual_buttons[index] = key
         device_layout.addLayout(keys)
         self.device_status = label("Virtual device: ready • no Pi connected", "muted")
         device_layout.addWidget(self.device_status)
+        self.link_button = button("Enable physical Pi link")
+        self.link_button.setToolTip("Requires ~/.keybow2040/windows.json created by the pairing utility")
+        self.link_button.clicked.connect(self.toggle_pi_link)
+        device_layout.addWidget(self.link_button)
         right.addWidget(device_card)
 
         guide_card, guide_layout = card()
@@ -345,6 +370,7 @@ class MainWindow(QMainWindow):
         changed = (self.real_backend.decide(choice, *token) if self.mode == "real"
                    else self.session.decide(choice, *token))
         if changed:
+            self._cue_event("declined" if choice == "decline" else "accepted")
             self._schedule_auto()
 
     def press_virtual(self, index):
@@ -360,9 +386,14 @@ class MainWindow(QMainWindow):
         else:
             changed = self.session.virtual_key(index)
         if changed:
+            if index in (0, 1, 2):
+                self._cue_event("declined" if index == 2 else "accepted")
+            elif index == 3:
+                self._cue_event("cancelled")
             self._schedule_auto()
 
     def cancel_turn(self):
+        self._cue_event("cancelled")
         if self.mode == "real":
             self.real_backend.cancel()
         else:
@@ -461,19 +492,191 @@ class MainWindow(QMainWindow):
             self.history.addItem(message)
         self._last_history_count = len(self.session.history)
         self.history.scrollToBottom()
+        self._sync_link()
         self.paint_leds()
+
+
+    # The network worker never touches Qt or Codex. All authenticated key
+    # events are dispatched here on the main/UI thread.
+    def _phase_name(self):
+        return {
+            Phase.IDLE: "idle", Phase.WORKING: "working",
+            Phase.APPROVAL: "approval", Phase.COMPLETED: "completed",
+            Phase.FAILED: "failed", Phase.CANCELLED: "cancelled",
+        }[self.session.phase]
+
+    def _cue_event(self, cue):
+        self._cue = cue
+        self._cue_id += 1
+        self.lights.trigger(cue, time.monotonic())
+        self._sync_link()
+
+    def _update_visual_holds(self):
+        now = time.monotonic()
+        both = self._physical_held | self._virtual_held
+        for index in range(12):
+            self.lights.key(index, index in both, now)
+
+    def _virtual_edge(self, index, pressed):
+        if pressed:
+            self._virtual_held.add(index)
+        else:
+            self._virtual_held.discard(index)
+        self._update_visual_holds()
+
+    def toggle_pi_link(self):
+        if self.keybow_server.running:
+            self.keybow_server.close()
+            self._physical_epoch = 0
+            self._physical_held.clear()
+            self._pending_physical = None
+            self._ambiguous_chord = False
+            self._physical_arm = None
+            self._physical_arm_identity = None
+            self._update_visual_holds()
+            self.render()
+            return
+        try:
+            self.keybow_server.start()
+        except (OSError, ValueError, FileNotFoundError) as exc:
+            QMessageBox.warning(
+                self, "Keybow Pi pairing",
+                f"Cannot start Pi link: {exc}\n\n"
+                "Create ~/.keybow2040/windows.json with the pairing utility. "
+                "See docs/keybow-pairing.md.")
+            return
+        self._last_link_error = ""
+        self.render()
+
+    def _poll_link(self):
+        for _ in range(256):
+            try:
+                event = self.keybow_server.events.get_nowait()
+            except queue.Empty:
+                break
+            kind = event[0]
+            if kind == "connected" and self.keybow_server.running:
+                self._physical_epoch = event[1]
+                self._physical_held.clear()
+                self._pending_physical = None
+                self._ambiguous_chord = False
+                self._physical_arm = None
+                self._physical_arm_identity = None
+                self._update_visual_holds()
+                self._cue_event("connected")
+            elif kind == "disconnected" and event[1] == self._physical_epoch:
+                self._physical_epoch = 0
+                self._physical_held.clear()
+                self._pending_physical = None
+                self._ambiguous_chord = False
+                self._physical_arm = None
+                self._physical_arm_identity = None
+                self._update_visual_holds()
+            elif kind == "error":
+                self._last_link_error = event[1]
+            elif kind == "snapshot" and event[1] == self._physical_epoch:
+                self._physical_held = set(event[2])
+                self._update_visual_holds()
+            elif kind == "key" and event[1] == self._physical_epoch:
+                _, _, index, pressed, arm = event
+                if (index in self._physical_held) == pressed:
+                    continue  # duplicate/repeated edge, never another decision
+                if pressed:
+                    self._physical_held.add(index)
+                else:
+                    self._physical_held.discard(index)
+                self._update_visual_holds()
+                if not pressed:
+                    if (index in (0, 1, 2) and self._ambiguous_chord
+                            and not (self._physical_held & {0, 1, 2})):
+                        self._ambiguous_chord = False
+                    continue
+                if index in (0, 1, 2):
+                    identity = self._physical_arm_identity
+                    valid = (
+                        self.keybow_server.connected and identity is not None
+                        and arm is not None and arm == self._physical_arm
+                        and identity[:2] == self._shown_key
+                        and identity[2] == self._physical_epoch
+                        and self.session.presented == self._shown_key
+                        and self.isVisible() and not self.isMinimized()
+                        and self.isActiveWindow()
+                    )
+                    if (self._pending_physical is not None or
+                            len(self._physical_held & {0, 1, 2}) > 1):
+                        # Ambiguous chord: never let arrival order select the
+                        # approval. Release all approval keys and try again.
+                        self._pending_physical = None
+                        self._ambiguous_chord = True
+                    elif valid and not self._ambiguous_chord:
+                        self._pending_physical = (
+                            index, arm, identity, time.monotonic())
+                elif index == 3:
+                    self._pending_physical = None  # cancel takes precedence
+                    self.press_virtual(index)
+                elif index == 4:
+                    self.press_virtual(index)
+        self._commit_physical_pending()
+        self._sync_link()
+        if hasattr(self, "device_status"):
+            if not self.keybow_server.running:
+                text = "Physical Pi: disabled • virtual keys work offline"
+            elif self._physical_epoch:
+                held = ", ".join(str(i) for i in sorted(self._physical_held)) or "none"
+                text = f"Physical Pi: connected • held: {held}"
+            else:
+                text = "Physical Pi: listening for paired Pi"
+                if self._last_link_error:
+                    text += f" • {self._last_link_error[:90]}"
+            self.device_status.setText(text)
+            self.link_button.setText(
+                "Disable physical Pi link" if self.keybow_server.running
+                else "Enable physical Pi link")
+
+
+    def _commit_physical_pending(self):
+        candidate = self._pending_physical
+        if candidate is None or time.monotonic() - candidate[3] < 0.09:
+            return
+        self._pending_physical = None
+        index, arm, identity, _started = candidate
+        if (not self._ambiguous_chord and
+                self.keybow_server.connected and
+                identity == self._physical_arm_identity and
+                arm == self._physical_arm and
+                self.session.presented == self._shown_key and
+                self.session.phase == Phase.APPROVAL and
+                len(self._physical_held & {0, 1, 2}) <= 1 and
+                self.isVisible() and not self.isMinimized() and
+                self.isActiveWindow()):
+            self.press_virtual(index)
+
+    def _sync_link(self):
+        if not self.keybow_server.running:
+            return
+        # Hardware approval is only armed after a foreground review card is
+        # both visible and marked presented. Blur/minimize/disconnect disarms.
+        identity = None
+        if (self._physical_epoch and self.keybow_server.connected
+                and self.session.phase == Phase.APPROVAL
+                and self._shown_key is not None
+                and self.session.presented == self._shown_key
+                and self.isVisible() and not self.isMinimized()
+                and self.isActiveWindow()):
+            identity = (*self._shown_key, self._physical_epoch)
+        if identity != self._physical_arm_identity:
+            self._pending_physical = None
+            self._ambiguous_chord = False
+            self._physical_arm_identity = identity
+            self._physical_arm = secrets.token_hex(16) if identity else None
+        self.keybow_server.publish(
+            self._phase_name(), arm=self._physical_arm,
+            cue=self._cue, cue_id=self._cue_id)
 
     def paint_leds(self):
         now = time.monotonic()
-        leds = self.session.leds()
-        for index, led in enumerate(leds):
-            if led.mode == "pulse":
-                intensity = 0.32 + 0.68 * (0.5 + 0.5 * math.sin(now * 4.5))
-            elif led.mode == "blink":
-                intensity = 1.0 if int(now * 3) % 2 else 0.15
-            else:
-                intensity = 1.0
-            color = tuple(max(0, min(255, int(c * intensity))) for c in led.rgb)
+        self.lights.set_phase(self._phase_name(), now)
+        for index, color in enumerate(self.lights.frame(now)):
             rgb = "#{:02x}{:02x}{:02x}".format(*color)
             self.virtual_buttons[index].setStyleSheet(
                 "QPushButton {"
@@ -486,6 +689,7 @@ class MainWindow(QMainWindow):
             )
 
     def closeEvent(self, event):
+        self.keybow_server.close()
         self.real_backend.close()
         if self._tray:
             self._tray.hide()
