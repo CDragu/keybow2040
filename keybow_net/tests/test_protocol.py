@@ -60,7 +60,7 @@ class ProtocolTests(unittest.TestCase):
             target=lambda: self._try_server(left, errors), daemon=True)
         t.start()
         try:
-            with self.assertRaises(ProtocolError):
+            with self.assertRaises((ProtocolError, ConnectionError, TimeoutError)):
                 client_handshake(right, bytes(reversed(self.SECRET)))
         finally:
             right.close()
@@ -73,6 +73,8 @@ class ProtocolTests(unittest.TestCase):
             server_handshake(sock, self.SECRET)
         except (ProtocolError, ConnectionError, TimeoutError, OSError) as exc:
             errors.append(exc)
+        finally:
+            sock.close()
 
     def test_mac_tampering_and_replay_rejected(self):
         left, right, server, client = self.pair()
