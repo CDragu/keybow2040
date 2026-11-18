@@ -23,7 +23,7 @@ jobs:
         with:
           python-version: '3.12'
       - name: Core and fake backend tests
-        run: python -m unittest desktop.tests.test_core desktop.tests.test_simulator desktop.tests.test_codex_backend desktop.tests.test_stdio desktop.tests.test_pi_server keybow_net.tests.test_protocol keybow_net.tests.test_effects pi.tests.test_bridge -v
+        run: python -m unittest desktop.tests.test_core desktop.tests.test_simulator desktop.tests.test_codex_backend desktop.tests.test_stdio desktop.tests.test_pi_server keybow_net.tests.test_protocol keybow_net.tests.test_effects keybow_net.tests.test_pairing pi.tests.test_bridge -v
 
   domain-windows:
     runs-on: windows-latest
@@ -33,7 +33,7 @@ jobs:
         with:
           python-version: '3.12'
       - name: Windows core and backend tests
-        run: python -m unittest desktop.tests.test_core desktop.tests.test_simulator desktop.tests.test_codex_backend desktop.tests.test_stdio desktop.tests.test_pi_server keybow_net.tests.test_protocol keybow_net.tests.test_effects pi.tests.test_bridge -v
+        run: python -m unittest desktop.tests.test_core desktop.tests.test_simulator desktop.tests.test_codex_backend desktop.tests.test_stdio desktop.tests.test_pi_server keybow_net.tests.test_protocol keybow_net.tests.test_effects keybow_net.tests.test_pairing pi.tests.test_bridge -v
 
   qt-offscreen:
     runs-on: ubuntu-latest
