@@ -1,4 +1,4 @@
-"""Windows Keybow Codex D0 desktop prototype (PySide6, completely offline).
+"""Keybow Codex desktop: offline simulator or real local Codex App Server.
 
 Run from repository root: python -m desktop
 """
@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
 )
 
 from desktop.core import KEY_LABELS, TERMINAL, Phase, SessionController
+from desktop.codex_backend import CodexBackend
 from desktop.simulator import SCENARIOS, SimulatedCodex
 
 
@@ -79,11 +80,13 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.session = SessionController()
         self.backend = SimulatedCodex(self.session)
+        self.real_backend = CodexBackend(self.session)
+        self.mode = "simulator"
         self.session.subscribe(self.render)
         self._shown_key = None
         self._last_history_count = 0
         self._tray = None
-        self.setWindowTitle("Keybow Codex • Offline simulator")
+        self.setWindowTitle("Keybow Codex • Simulator / Real Codex")
         self.setMinimumSize(1000, 670)
         self.resize(1240, 810)
         self.setStyleSheet(STYLE)
@@ -94,6 +97,10 @@ class MainWindow(QMainWindow):
         self.led_timer.setInterval(80)
         self.led_timer.timeout.connect(self.paint_leds)
         self.led_timer.start()
+        self.codex_timer = QTimer(self)
+        self.codex_timer.setInterval(40)
+        self.codex_timer.timeout.connect(self.real_backend.poll)
+        self.codex_timer.start()
 
     def _build(self):
         root = QWidget()
@@ -105,9 +112,10 @@ class MainWindow(QMainWindow):
         header = QHBoxLayout()
         brand = QVBoxLayout()
         brand.addWidget(label("KEYBOW  /  CODEX", "brand"))
-        brand.addWidget(label("Windows companion • offline interactive prototype", "muted"))
+        brand.addWidget(label("Windows companion • local Codex or offline simulator", "muted"))
         header.addLayout(brand, 1)
-        header.addWidget(label("SIMULATED — NO COMMANDS RUN", "badge"))
+        self.mode_badge = label("SIMULATOR — NO COMMANDS RUN", "badge")
+        header.addWidget(self.mode_badge)
         outer.addLayout(header)
 
         project_card, project_row = card()
@@ -137,12 +145,22 @@ class MainWindow(QMainWindow):
         prompt_layout.addWidget(label("TASK PROMPT", "section"))
         self.prompt_edit = QPlainTextEdit()
         self.prompt_edit.setPlaceholderText(
-            "Describe a task, e.g. 'Refactor the parser and add unit tests'.\n"
-            "This is a simulation; your text will not be sent anywhere."
+            "Describe a task. Real Codex can read and potentially modify your selected project."
         )
         self.prompt_edit.setPlainText("Refactor the parser and run the unit tests")
         self.prompt_edit.setMaximumHeight(112)
         prompt_layout.addWidget(self.prompt_edit)
+        mode_line = QHBoxLayout()
+        mode_line.addWidget(label("Backend", "muted"))
+        self.mode_picker = QComboBox()
+        self.mode_picker.addItem("Simulator (offline)", userData="simulator")
+        self.mode_picker.addItem("Real Codex (local)", userData="real")
+        mode_line.addWidget(self.mode_picker, 1)
+        self.sandbox_picker = QComboBox()
+        self.sandbox_picker.addItem("Read-only (recommended)", userData="read-only")
+        self.sandbox_picker.addItem("Workspace write", userData="workspace-write")
+        mode_line.addWidget(self.sandbox_picker, 1)
+        prompt_layout.addLayout(mode_line)
         scenario_line = QHBoxLayout()
         scenario_line.addWidget(label("Scenario", "muted"))
         self.scenario_picker = QComboBox()
@@ -176,6 +194,16 @@ class MainWindow(QMainWindow):
         self.ack_button.clicked.connect(self.acknowledge)
         status_layout.addWidget(self.ack_button)
         left.addWidget(status_card)
+
+        reply_card, reply_layout = card()
+        reply_layout.addWidget(label("CODEX RESPONSE", "section"))
+        self.reply_view = QPlainTextEdit()
+        self.reply_view.setReadOnly(True)
+        self.reply_view.setPlaceholderText("Codex response text appears here. In simulator mode no real response is generated.")
+        self.reply_view.setMinimumHeight(105)
+        self.reply_view.setMaximumHeight(190)
+        reply_layout.addWidget(self.reply_view)
+        left.addWidget(reply_card)
 
         self.approval_card, approval_layout = card()
         approval_layout.addWidget(label("⚠  APPROVAL REQUIRED", "section"))
@@ -235,14 +263,21 @@ class MainWindow(QMainWindow):
 
         guide_card, guide_layout = card()
         guide_layout.addWidget(label("HOW TO TEST", "section"))
-        guide_layout.addWidget(label(
-            "1. Choose a scenario and simulate a turn.\n\n"
-            "2. When approval appears, inspect the command, folder and reason.\n\n"
-            "3. Use the virtual red keys or the approval buttons.\n\n"
-            "4. Test decline, cancel, failure and two approvals.\n\n"
-            "5. Acknowledge the result to start again.", "muted"))
+        self.guide_text = label("", "muted")
+        guide_layout.addWidget(self.guide_text)
         right.addWidget(guide_card)
         right.addStretch(1)
+        self.mode_picker.currentIndexChanged.connect(self.on_mode_changed)
+        self.prompt_edit.textChanged.connect(self.render)
+
+    def on_mode_changed(self):
+        if self.session.phase != Phase.IDLE:
+            return
+        next_mode = self.mode_picker.currentData()
+        if self.mode != next_mode and next_mode != "real":
+            self.real_backend.close()
+        self.mode = next_mode
+        self.render()
 
     def _make_tray(self):
         if not QSystemTrayIcon.isSystemTrayAvailable():
@@ -259,14 +294,14 @@ class MainWindow(QMainWindow):
                 painter.drawEllipse(x - 2, y - 2, 4, 4)
         painter.end()
         menu = QMenu(self)
-        show_action = QAction("Show simulator", self)
+        show_action = QAction("Show Keybow desktop", self)
         show_action.triggered.connect(self.showNormal)
         quit_action = QAction("Quit", self)
         quit_action.triggered.connect(self.close)
         menu.addAction(show_action)
         menu.addAction(quit_action)
         self._tray = QSystemTrayIcon(QIcon(pixmap), self)
-        self._tray.setToolTip("Keybow Codex — simulated")
+        self._tray.setToolTip("Keybow Codex Desktop")
         self._tray.setContextMenu(menu)
         self._tray.activated.connect(lambda _: self.showNormal())
         self._tray.show()
@@ -278,12 +313,16 @@ class MainWindow(QMainWindow):
             self.session.set_project(directory)
 
     def send_prompt(self):
-        if self.backend.start(self.prompt_edit.toPlainText(),
-                              self.scenario_picker.currentData()):
+        if self.mode == "real":
+            self.real_backend.start(self.prompt_edit.toPlainText(),
+                                    self.sandbox_picker.currentData())
+        elif self.backend.start(self.prompt_edit.toPlainText(),
+                                self.scenario_picker.currentData()):
             self._schedule_auto()
 
     def _schedule_auto(self):
-        if not self.auto_play.isChecked() or self.session.phase != Phase.WORKING:
+        if (self.mode != "simulator" or not self.auto_play.isChecked()
+                or self.session.phase != Phase.WORKING):
             return
         run_id = self.session.run_id
         QTimer.singleShot(850, lambda: self._auto_advance(run_id))
@@ -293,27 +332,41 @@ class MainWindow(QMainWindow):
             self.advance()
 
     def advance(self):
-        self.backend.advance()
+        if self.mode == "simulator":
+            self.backend.advance()
 
     def _current_token(self):
         return self._shown_key
 
     def approve(self, choice):
         token = self._current_token()
-        if token and self.session.decide(choice, *token):
+        if not token:
+            return
+        changed = (self.real_backend.decide(choice, *token) if self.mode == "real"
+                   else self.session.decide(choice, *token))
+        if changed:
             self._schedule_auto()
 
     def press_virtual(self, index):
         token = self._current_token()
         if index in (0, 1, 2) and token:
-            changed = self.session.virtual_key(index, *token)
+            if self.mode == "real":
+                choice = {0: "once", 1: "session", 2: "decline"}[index]
+                changed = self.real_backend.decide(choice, *token)
+            else:
+                changed = self.session.virtual_key(index, *token)
+        elif index == 3 and self.mode == "real":
+            changed = self.real_backend.cancel()
         else:
             changed = self.session.virtual_key(index)
         if changed:
             self._schedule_auto()
 
     def cancel_turn(self):
-        self.session.cancel()
+        if self.mode == "real":
+            self.real_backend.cancel()
+        else:
+            self.session.cancel()
 
     def acknowledge(self):
         self.session.acknowledge()
@@ -323,16 +376,42 @@ class MainWindow(QMainWindow):
         self.project_label.setText(self.session.project)
         self.status_label.setText(phase.value)
         detail = self.session.outcome or (
-            f"Simulated turn #{self.session.run_id} — no real Codex process."
-            if phase != Phase.IDLE else "Ready to preview an interaction offline.")
+            (f"Codex turn #{self.session.run_id} running locally." if self.mode == "real"
+             else f"Simulated turn #{self.session.run_id} — no real Codex process.")
+            if phase != Phase.IDLE else "Select a project and submit a prompt.")
+        self.mode_badge.setText(
+            "REAL CODEX — LOCAL PROJECT ACCESS" if self.mode == "real"
+            else "SIMULATOR — NO COMMANDS RUN")
+        self.send_button.setText(
+            "▶  Send to Codex" if self.mode == "real" else "▶  Simulate turn")
+        self.mode_picker.setEnabled(phase == Phase.IDLE)
+        self.scenario_picker.setEnabled(self.mode == "simulator" and phase == Phase.IDLE)
+        self.auto_play.setEnabled(self.mode == "simulator")
+        self.sandbox_picker.setEnabled(self.mode == "real" and phase == Phase.IDLE)
+        self.step_button.setVisible(self.mode == "simulator")
+        self.guide_text.setText(
+            "Real mode runs the installed Codex CLI against the selected folder. "
+            "Read-only is the safest starting point. Workspace-write can edit files "
+            "within your project under Codex sandbox and approval rules. "
+            "Review every approval before clicking a virtual key. "
+            "Stop sends a turn interruption."
+            if self.mode == "real" else
+            "1. Choose a scenario and simulate a turn.\n\n"
+            "2. When approval appears, inspect command, folder and reason.\n\n"
+            "3. Use the virtual red keys or the approval buttons.\n\n"
+            "4. Test decline, cancel, failure and two approvals.\n\n"
+            "5. Acknowledge the result to start again.")
+        if self.reply_view.toPlainText() != self.session.output:
+            self.reply_view.setPlainText(self.session.output)
+            sb = self.reply_view.verticalScrollBar()
+            sb.setValue(sb.maximum())
         self.status_detail.setText(detail)
         self.pick_project.setEnabled(phase == Phase.IDLE)
-        self.scenario_picker.setEnabled(phase == Phase.IDLE)
         self.prompt_edit.setEnabled(phase == Phase.IDLE)
         self.send_button.setEnabled(phase == Phase.IDLE and
                                     bool(self.prompt_edit.toPlainText().strip()))
         self.cancel_button.setEnabled(phase in (Phase.WORKING, Phase.APPROVAL))
-        self.step_button.setEnabled(phase == Phase.WORKING)
+        self.step_button.setEnabled(self.mode == "simulator" and phase == Phase.WORKING)
         self.ack_button.setEnabled(phase in TERMINAL)
 
         request = self.session.request if phase == Phase.APPROVAL else None
@@ -407,6 +486,7 @@ class MainWindow(QMainWindow):
             )
 
     def closeEvent(self, event):
+        self.real_backend.close()
         if self._tray:
             self._tray.hide()
         super().closeEvent(event)
@@ -414,7 +494,7 @@ class MainWindow(QMainWindow):
 
 def main():
     app = QApplication(sys.argv)
-    app.setApplicationName("Keybow Codex Simulator")
+    app.setApplicationName("Keybow Codex Desktop")
     window = MainWindow()
     window.show()
     return app.exec()

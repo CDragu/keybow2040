@@ -1,4 +1,4 @@
-> **Original 12-key Keybow / Windows Codex controller:** the [Raspberry Pi diagnostic](pi/README.md) and [offline Windows desktop simulator](desktop/README.md) are available for testing. [Desktop roadmap](docs/windows-app-plan.md). These are separate from the existing 16-key Keybow 2040 macOS switcher and audio looper. The Pi diagnostic still needs physical-hardware verification; the desktop simulator does not run Codex.
+> **Original 12-key Keybow / Windows Codex controller:** Raspberry Pi [12-key diagnostics](pi/README.md) and the Windows [desktop app with offline simulation plus real Codex App Server mode](desktop/README.md) are available. See the [desktop roadmap](docs/windows-app-plan.md). Physical Pi hardware and real Codex-on-Windows testing are still required. The existing Keybow 2040 macOS session switcher and live looper remain untouched.
 
 # Keybow 2040 AI session switcher (and live looper)
 
