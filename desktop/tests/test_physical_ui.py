@@ -5,6 +5,7 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication
+from PySide6.QtTest import QTest
 
 from desktop.app import MainWindow
 from desktop.core import Phase
@@ -66,22 +67,32 @@ class PhysicalUiTests(unittest.TestCase):
         fake.events.put(("key", 1, 0, False, None))
         fake.events.put(("key", 1, 0, True, arm))
         self.win._poll_link()
+        QTest.qWait(130)
+        self.win._poll_link()
         self.assertEqual(self.win.session.phase, Phase.WORKING)
         self.assertEqual(self.win._physical_held, {0})
 
-    def test_two_press_events_make_only_one_decision(self):
+    def test_ambiguous_simultaneous_approval_chord_is_ignored(self):
         arm = self.prepare()
         fake = self.win.keybow_server
         fake.events.put(("key", 1, 0, True, arm))
         fake.events.put(("key", 1, 1, True, arm))
         self.win._poll_link()
-        self.assertEqual(self.win.session.phase, Phase.WORKING)
+        QTest.qWait(130)
+        self.win._poll_link()
+        self.assertEqual(self.win.session.phase, Phase.APPROVAL)
         self.assertEqual(self.win._physical_held, {0, 1})
-        self.assertIsNone(self.win._physical_arm)
         fake.events.put(("key", 1, 0, False, None))
         fake.events.put(("key", 1, 1, False, None))
         self.win._poll_link()
         self.assertEqual(self.win._physical_held, set())
+        self.assertFalse(self.win._ambiguous_chord)
+        # Fresh individual key-down is accepted after the chord is released.
+        fake.events.put(("key", 1, 0, True, arm))
+        self.win._poll_link()
+        QTest.qWait(130)
+        self.win._poll_link()
+        self.assertEqual(self.win.session.phase, Phase.WORKING)
 
     def test_disconnected_pi_disarms_request(self):
         self.prepare()
