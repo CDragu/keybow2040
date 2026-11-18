@@ -6,7 +6,7 @@ A Python/PySide6 Windows desktop app with an animated virtual **original
 - **Simulator (default)**: fully offline, scripted scenarios and no external
   processes, file changes, or network.
 - **Real Codex**: launches your **installed Codex CLI** as a local
-  \`codex app-server\` process. You can send prompts to Codex, see streaming
+  `codex app-server` process. You can send prompts to Codex, see streaming
   responses, review command/file approvals, and accept/decline using the
   onscreen controls or virtual keys. **Real Codex may execute commands and
   modify files according to its configured sandbox and approvals.**
@@ -16,39 +16,39 @@ physical Pi networking is the later D2 milestone.
 
 ## Windows setup
 
-Install Python 3.12+ (with the \`py\` launcher), and install the Codex CLI using
+Install Python 3.12+ (with the `py` launcher), and install the Codex CLI using
 Node.js/npm. Sign in with the CLI:
 
-\`\`\`powershell
+```powershell
 npm install -g @openai/codex
 codex login
 codex --version
-\`\`\`
+```
 
 Then clone/update this repo and launch the desktop:
 
-\`\`\`powershell
+```powershell
 git clone https://github.com/CDragu/keybow2040.git
 cd keybow2040
 git switch feature/d1-real-codex-appserver
 .\desktop\run-windows.bat
-\`\`\`
+```
 
-If you already have a checkout, \`git fetch\` and
-\`git switch feature/d1-real-codex-appserver\` rather than cloning again.
-After the PR is merged, just \`git switch main\` and \`git pull\`.
+If you already have a checkout, `git fetch` and
+`git switch feature/d1-real-codex-appserver` rather than cloning again.
+After the PR is merged, just `git switch main` and `git pull`.
 
-The launcher creates \`.venv-desktop\` and installs PySide6. If \`codex\` is
+The launcher creates `.venv-desktop` and installs PySide6. If `codex` is
 not found on PATH, Real mode will display an error; close/reopen your
 terminal after installing npm global tools.
 
 Manual setup:
 
-\`\`\`powershell
+```powershell
 py -3 -m venv .venv-desktop
 .\.venv-desktop\Scripts\python.exe -m pip install -r desktop\requirements.txt
 .\.venv-desktop\Scripts\python.exe -m desktop
-\`\`\`
+```
 
 No .exe/installer is shipped yet.
 
@@ -66,7 +66,7 @@ Codex may perform read-only tool/command activity under its sandbox.
 For coding tasks you want Codex to edit, explicitly select **Workspace write**
 *before* starting the turn. This grants sandboxed write access to the
 selected project and may allow edits that do not individually require
-approval. \`approvalPolicy\` is always \`on-request\` (never bypass).
+approval. `approvalPolicy` is always `on-request` (never bypass).
 
 When Codex sends a command/file approval request, the **red virtual keys**
 light up. Read the command, working directory, reason and proposed file
@@ -97,9 +97,9 @@ Enable Auto-advance or click **Next simulated event**. All actions are fake.
 
 ## Tests
 
-\`\`\`powershell
+```powershell
 .\.venv-desktop\Scripts\python.exe -m unittest discover -s desktop/tests -v
-\`\`\`
+```
 
 GitHub Actions runs pure-Python core, Codex protocol and subprocess stdio
 tests on **Windows and Linux**; offscreen PySide6 UI tests run on Linux.
@@ -108,14 +108,14 @@ is still required before calling D1 production-ready.
 
 ## Internal architecture
 
-- \`core.py\`: shared session state and approval gate (validates request
+- `core.py`: shared session state and approval gate (validates request
   identity, UI visibility, and allowed decisions).
-- \`simulator.py\`: deterministic offline Codex stand-in.
-- \`codex_backend.py\`: stdio JSON-RPC process manager and event parser. Uses
+- `simulator.py`: deterministic offline Codex stand-in.
+- `codex_backend.py`: stdio JSON-RPC process manager and event parser. Uses
   dedicated stdout/stderr threads; the Qt main loop drains a message queue.
-- \`app.py\`: mode selector, project chooser, read-only/workspace-write
+- `app.py`: mode selector, project chooser, read-only/workspace-write
   selector, streaming reply panel, virtual keypad, approval review UI.
-- \`tests/\`: protocol and UI tests; a fake subprocess App Server confirms
+- `tests/`: protocol and UI tests; a fake subprocess App Server confirms
   newline-delimited JSON-RPC round trips.
 
 Reference: [official Codex App Server documentation](https://learn.chatgpt.com/docs/app-server).
