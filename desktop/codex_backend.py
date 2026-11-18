@@ -261,6 +261,8 @@ class CodexBackend:
         if self.transport is None:
             return
         for _ in range(max_messages):
+            if self.transport is None:
+                break
             try:
                 msg = self.transport.events.get_nowait()
             except queue.Empty:
