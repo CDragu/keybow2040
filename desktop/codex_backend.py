@@ -188,6 +188,7 @@ class CodexBackend:
         self.sandbox = "read-only"
         self.last_error = ""
         self.inflight = False
+        self.finished_turns = set()
 
     def start(self, prompt, sandbox="read-only"):
         if self.session.phase != Phase.IDLE or not prompt.strip():
@@ -320,7 +321,7 @@ class CodexBackend:
                 self._fail("Turn ID mismatch; approvals disabled.")
                 return
             self.turn_id = returned_id
-            if self.session.phase == Phase.CANCELLED:
+            if self.session.phase == Phase.CANCELLED and self.inflight:
                 self._send("turn/interrupt", {"threadId": self.thread_id,
                                                "turnId": self.turn_id}, "turn/interrupt")
             else:
@@ -346,7 +347,8 @@ class CodexBackend:
             return
         if method == "turn/started":
             turn_id = _id((params.get("turn") or {}).get("id"))
-            if turn_id and self.turn_id is None and self.session.phase == Phase.WORKING:
+            if (turn_id and turn_id not in self.finished_turns and
+                    self.turn_id is None and self.session.phase == Phase.WORKING):
                 self.turn_id = turn_id
                 self._drain_early()
             return
@@ -354,8 +356,10 @@ class CodexBackend:
         if method == "turn/completed":
             turn = params.get("turn") or {}
             finished_id = _id(turn.get("id"))
-            if not finished_id or (self.turn_id and finished_id != self.turn_id):
+            if (not finished_id or finished_id in self.finished_turns or
+                    (self.turn_id and finished_id != self.turn_id)):
                 return
+            self.finished_turns.add(finished_id)
             status = turn.get("status", "failed")
             self.inflight = False
             self.active_approval = None
@@ -373,7 +377,8 @@ class CodexBackend:
             return
         if self.session.phase not in (Phase.WORKING, Phase.APPROVAL):
             return
-        if self.turn_id and turn_id and turn_id != self.turn_id:
+        if (method.startswith("item/") and
+                (not self.turn_id or turn_id != self.turn_id)):
             return
         if method in ("item/started", "item/completed"):
             item = params.get("item") or {}
