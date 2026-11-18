@@ -1,0 +1,16 @@
+[Unit]
+Description=Original Keybow 12-key hardware diagnostic for %i
+After=multi-user.target
+
+[Service]
+Type=simple
+User=%i
+SupplementaryGroups=gpio spi
+WorkingDirectory=/home/%i/keybow2040
+ExecStart=/home/%i/keybow2040/.venv/bin/python -m pi.service --backend real
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
