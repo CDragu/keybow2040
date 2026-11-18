@@ -156,6 +156,7 @@ class PiBridge:
         self.arm = None
         self.arm_since = float("inf")
         self.active_epoch = 0
+        self.online_since = float("inf")
         self.last_cue_id = None
         self.effects = LightEngine(self.clock())
         self.last_frame = None
@@ -171,6 +172,7 @@ class PiBridge:
         now = self.clock()
         if kind == "connected":
             self.active_epoch = epoch
+            self.online_since = now
             self.arm = None
             self.arm_since = float("inf")
             self.armed_ready.clear()
@@ -179,6 +181,7 @@ class PiBridge:
             self.effects.trigger("connected", now)
         elif epoch == self.active_epoch and kind == "disconnected":
             self.active_epoch = 0
+            self.online_since = float("inf")
             self.arm = None
             self.arm_since = float("inf")
             self.armed_ready.clear()
@@ -219,18 +222,20 @@ class PiBridge:
                 continue
             if pressed:
                 self.held.add(index)
-                valid_arm = (self.arm is not None and when >= self.arm_since
+                valid_arm = (index in (0, 1, 2) and self.arm is not None
+                             and when > self.arm_since
                              and index in self.armed_ready)
-                if valid_arm:
+                if index in (0, 1, 2) and self.arm is not None:
                     self.armed_ready.discard(index)
                 tag = self.arm if valid_arm else None
             else:
                 self.held.discard(index)
-                if self.arm is not None and when >= self.arm_since:
+                if self.arm is not None and when > self.arm_since:
                     self.armed_ready.add(index)
                 tag = None
             self.client.set_held(self.held)
-            if self.active_epoch:
+            # Never replay key-down edges captured before authentication.
+            if self.active_epoch and (not pressed or when > self.online_since):
                 self.client.send_key(index, pressed, tag, self.active_epoch)
         self.paint()
 
