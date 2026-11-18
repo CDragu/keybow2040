@@ -9,10 +9,19 @@ $Build = Join-Path $Repo 'build\windows'
 $Dist = Join-Path $Repo 'dist\windows'
 $Installer = Join-Path $Dist "KeybowCodex-$Version-x64-Setup.exe"
 $Compiler = Get-Command ISCC.exe -ErrorAction SilentlyContinue
-$ISCC = if ($Compiler) { $Compiler.Source } else {
-    Join-Path ([Environment]::GetEnvironmentVariable('ProgramFiles(x86)')) 'Inno Setup 6\ISCC.exe'
+$ISCC = if ($Compiler) {
+    $Compiler.Source
+} else {
+    $Locations = @(
+        [Environment]::GetEnvironmentVariable('ProgramFiles(x86)'),
+        $env:ProgramFiles,
+        (Join-Path $env:LOCALAPPDATA 'Programs')
+    )
+    $Locations | Where-Object { $_ } | ForEach-Object {
+        Join-Path $_ 'Inno Setup 6\ISCC.exe'
+    } | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
 }
-if (-not (Test-Path -LiteralPath $ISCC)) {
+if (-not $ISCC) {
     throw 'Install Inno Setup 6 before building the installer.'
 }
 
