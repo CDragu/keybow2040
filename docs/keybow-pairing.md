@@ -89,7 +89,20 @@ python3 -m pi.bridge --backend mock --duration 30
 Do not run the diagnostic service and bridge service simultaneously (both
 would control the same hardware). You can install
 [the systemd bridge unit](../pi/keybow-bridge@.service) only after
-successful manual testing. The original keybow==0.0.3 library may require
+successful manual testing. To install the optional autostart unit after
+stopping the diagnostic service, run:
+
+~~~bash
+sudo systemctl disable --now "keybow-diag@$USER.service" 2>/dev/null || true
+sudo cp pi/keybow-bridge@.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now "keybow-bridge@$USER.service"
+journalctl -u "keybow-bridge@$USER.service" -f
+~~~
+
+The unit assumes the repository is in /home/YOUR_USER/keybow2040 and the
+Python venv is .venv, just like the diagnostic service. The original
+keybow==0.0.3 library may require
 work on newer Pi OS images; this still needs physical verification.
 
 ## Windows desktop
@@ -106,8 +119,10 @@ be in the foreground with the review card visible, at which point a fresh
 unpredictable arming token is sent to the Pi. A held/queued press cannot
 approve anything: release and press again *after* the Pi has received the
 token. Windows still validates the current request, allowed decision,
-connection epoch and UI state before answering Codex. Simultaneous approval
-presses can decide at most one request. Disconnect/focus loss disarms it.
+connection epoch and UI state before answering Codex. Near-simultaneous approval
+presses (within a short 90ms decision window) form an ambiguous chord and
+are **ignored**, rather than accepting whichever key arrived first. Release
+all approval keys before trying again. Disconnect/focus loss disarms it.
 
 - Key 0: approve once (only when offered)
 - Key 1: approve for session (only when offered)
