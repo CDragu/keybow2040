@@ -72,6 +72,8 @@ class LineSocket:
         while True:
             end = self.buffer.find(b"\n")
             if end >= 0:
+                if end + 1 > MAX_LINE:
+                    raise ProtocolError("Incoming frame too large.")
                 raw = bytes(self.buffer[:end])
                 del self.buffer[:end + 1]
                 try:
