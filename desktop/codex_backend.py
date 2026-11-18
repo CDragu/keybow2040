@@ -77,7 +77,7 @@ class JsonRpcProcess:
                     self.events.put({"_transport_error": "Codex sent a non-object message."})
                     break
                 self.events.put(msg)
-        except (OSError, UnicodeError) as exc:
+        except (OSError, UnicodeError, ValueError) as exc:
             if not self._closing:
                 self.events.put({"_transport_error": f"Codex stdout read failed: {exc}"})
         finally:
@@ -193,8 +193,7 @@ class CodexBackend:
     def start(self, prompt, sandbox="read-only"):
         if self.session.phase != Phase.IDLE or not prompt.strip():
             return False
-        if self.inflight or any(tag in ('turn/start', 'turn/interrupt')
-                                for tag in self.callbacks.values()):
+        if self.inflight or self.callbacks:
             self.session._emit('Codex is still finishing the previous turn. Try again after it stops.')
             return False
         project = str(Path(self.session.project).resolve())
@@ -286,7 +285,9 @@ class CodexBackend:
         elif "id" in msg:
             self._response(msg)
         elif "method" in msg:
-            self._notification(msg["method"], msg.get("params") or {})
+            params = msg.get("params") or {}
+            if isinstance(params, dict):
+                self._notification(msg["method"], params)
 
     def _response(self, msg):
         tag = self.callbacks.pop(msg["id"], None)
@@ -399,6 +400,9 @@ class CodexBackend:
         rpc_id = msg.get("id")
         method = msg.get("method")
         params = msg.get("params") or {}
+        if not isinstance(params, dict):
+            self.transport.reject(rpc_id, message="Malformed request parameters")
+            return
         if method not in APPROVAL_METHODS:
             self.transport.reject(rpc_id, message=f"Unsupported request: {method}")
             self.session._emit(f"Unsupported Codex request safely rejected: {method}")
