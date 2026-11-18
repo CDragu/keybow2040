@@ -1,3 +1,5 @@
+> **Original 12-key Keybow / Windows Codex controller (new work):** the Raspberry Pi Zero WH hardware diagnostic is in [`pi/`](pi/README.md), and the planned Windows desktop application is in [`docs/windows-app-plan.md`](docs/windows-app-plan.md). These are separate from the existing 16-key Keybow 2040 macOS switcher and audio looper described below. The Pi diagnostic is not yet verified on physical hardware.
+
 # Keybow 2040 AI session switcher (and live looper)
 
 Turns a [Pimoroni Keybow 2040](https://shop.pimoroni.com/products/keybow-2040) into a
