@@ -1,6 +1,6 @@
 # Windows Keybow Codex Controller — desktop application plan
 
-Status: **D0 offline Windows simulator implemented** ([run instructions](../desktop/README.md)). D1 real Codex integration and D2 Pi networking are not yet implemented. Hardware diagnostic lives at
+Status: **D0 offline simulator complete; D1 initial real Codex App Server bridge implemented** ([Windows setup](../desktop/README.md)). D1 requires validation on an actual logged-in Windows installation; D2 Pi networking is not yet implemented. Hardware diagnostic lives at
 [`pi/`](../pi/README.md). The new target is the original **12-key Keybow with
 Pi Zero WH**, replacing the 16-key CircuitPython assumptions in
 [`keybow-codex-mvp.txt`](../keybow-codex-mvp.txt).
