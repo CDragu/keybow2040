@@ -1,13 +1,17 @@
-name: Keybow Windows desktop tests
+name: Keybow desktop and Pi network tests
 
 on:
   push:
     paths:
       - 'desktop/**'
+      - 'pi/**'
+      - 'keybow_net/**'
       - '.github/workflows/desktop-tests.yml'
   pull_request:
     paths:
       - 'desktop/**'
+      - 'pi/**'
+      - 'keybow_net/**'
       - '.github/workflows/desktop-tests.yml'
 
 jobs:
@@ -19,7 +23,7 @@ jobs:
         with:
           python-version: '3.12'
       - name: Core and fake backend tests
-        run: python -m unittest desktop.tests.test_core desktop.tests.test_simulator desktop.tests.test_codex_backend desktop.tests.test_stdio -v
+        run: python -m unittest desktop.tests.test_core desktop.tests.test_simulator desktop.tests.test_codex_backend desktop.tests.test_stdio desktop.tests.test_pi_server keybow_net.tests.test_protocol keybow_net.tests.test_effects pi.tests.test_bridge -v
 
   domain-windows:
     runs-on: windows-latest
@@ -29,7 +33,7 @@ jobs:
         with:
           python-version: '3.12'
       - name: Windows core and backend tests
-        run: python -m unittest desktop.tests.test_core desktop.tests.test_simulator desktop.tests.test_codex_backend desktop.tests.test_stdio -v
+        run: python -m unittest desktop.tests.test_core desktop.tests.test_simulator desktop.tests.test_codex_backend desktop.tests.test_stdio desktop.tests.test_pi_server keybow_net.tests.test_protocol keybow_net.tests.test_effects pi.tests.test_bridge -v
 
   qt-offscreen:
     runs-on: ubuntu-latest
@@ -46,5 +50,8 @@ jobs:
           sudo apt-get install -y libegl1 libopengl0 libxkbcommon-x11-0
       - name: Install desktop dependency
         run: python -m pip install -r desktop/requirements.txt
-      - name: Full UI and state tests
-        run: python -m unittest discover -s desktop/tests -v
+      - name: Full UI, protocol and state tests
+        run: |
+          python -m unittest discover -s desktop/tests -v
+          python -m unittest discover -s pi/tests -v
+          python -m unittest discover -s keybow_net/tests -v
