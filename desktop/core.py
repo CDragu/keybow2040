@@ -1,8 +1,4 @@
-"""Deterministic, Qt-independent state and approval gate for the D0 simulator.
-
-No network, shell execution, Codex CLI, or physical Keybow integration occurs
-in this module. A future real backend must preserve these state invariants.
-"""
+"""Qt-independent session state and approval gate shared by real and fake Codex."""
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -54,7 +50,8 @@ class SessionController:
         self.request: Optional[ApprovalRequest] = None
         self.presented: Optional[tuple[int, str]] = None
         self.outcome = ""
-        self.history: list[str] = ["Simulator ready — nothing is connected to Codex."]
+        self.output = ""
+        self.history: list[str] = ["Keybow desktop ready. Choose Simulator or Real Codex."]
         self._seen: set[str] = set()
         self._observers: list[Callable[[], None]] = []
 
@@ -63,8 +60,16 @@ class SessionController:
 
     def _emit(self, message: str):
         self.history.append(message)
+        self._notify()
+
+    def _notify(self):
         for callback in tuple(self._observers):
             callback()
+
+    def append_output(self, text: str):
+        if text:
+            self.output += text
+            self._notify()
 
     def set_project(self, path: str):
         if self.phase != Phase.IDLE or not path.strip():
@@ -73,17 +78,18 @@ class SessionController:
         self._emit(f"Selected project: {path}")
         return True
 
-    def start(self, prompt: str):
+    def start(self, prompt: str, source="simulator"):
         if self.phase != Phase.IDLE or not prompt.strip():
             return False
         self.run_id += 1
         self._seen.clear()
         self.prompt = prompt.strip()
+        self.output = ""
         self.phase = Phase.WORKING
         self.request = None
         self.presented = None
         self.outcome = ""
-        self._emit(f"Turn #{self.run_id} started (simulated).")
+        self._emit(f"Turn #{self.run_id} started ({source}).")
         return True
 
     def request_approval(self, request: ApprovalRequest):
@@ -120,18 +126,29 @@ class SessionController:
             and decision in self.request.allowed
         )
 
-    def decide(self, decision: str, run_id: int, request_id: str):
+    def decide(self, decision: str, run_id: int, request_id: str,
+               continue_on_decline=False):
         if not self.can_decide(decision, run_id, request_id):
             return False
         self.presented = None
         self.request = None
-        if decision == "decline":
+        if decision == "decline" and not continue_on_decline:
             self.phase = Phase.FAILED
             self.outcome = "Simulated request declined."
         else:
             self.phase = Phase.WORKING
             self.outcome = ""
         self._emit(f"Approval decision: {decision} for [{request_id}].")
+        return True
+
+    def clear_approval(self):
+        """Invalidate a request resolved/removed by the server."""
+        if self.phase != Phase.APPROVAL:
+            return False
+        self.phase = Phase.WORKING
+        self.request = None
+        self.presented = None
+        self._emit("Approval no longer pending.")
         return True
 
     def complete(self, success=True, explanation=""):
