@@ -582,7 +582,8 @@ class MainWindow(QMainWindow):
                     continue
                 if index in (0, 1, 2):
                     identity = self._physical_arm_identity
-                    if (identity is not None and arm is not None and
+                    if (self.keybow_server.connected and identity is not None
+                            and arm is not None and
                             arm == self._physical_arm and
                             identity[:2] == self._shown_key and
                             identity[2] == self._physical_epoch and
@@ -614,7 +615,8 @@ class MainWindow(QMainWindow):
         # Hardware approval is only armed after a foreground review card is
         # both visible and marked presented. Blur/minimize/disconnect disarms.
         identity = None
-        if (self._physical_epoch and self.session.phase == Phase.APPROVAL
+        if (self._physical_epoch and self.keybow_server.connected
+                and self.session.phase == Phase.APPROVAL
                 and self._shown_key is not None
                 and self.session.presented == self._shown_key
                 and self.isVisible() and not self.isMinimized()
