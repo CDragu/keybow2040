@@ -1,77 +1,122 @@
-# Keybow Codex — D0 Windows desktop simulator
+# Keybow Codex Desktop — simulated and real Codex modes
 
-A real **PySide6 desktop UI** and **scripted fake Codex backend**. Nothing is
-sent to an AI provider and **no commands or file edits are executed**. The Keybow
-is rendered as a clickable 3-column × 4-row virtual device. **No physical
-Keybow, Pi, network connection, Codex CLI, or API key is required.**
+A Python/PySide6 Windows desktop app with an animated virtual **original
+12-key Keybow**. It supports two modes:
 
-The new code is separate from the existing macOS session switcher and audio
-looper.
+- **Simulator (default)**: fully offline, scripted scenarios and no external
+  processes, file changes, or network.
+- **Real Codex**: launches your **installed Codex CLI** as a local
+  \`codex app-server\` process. You can send prompts to Codex, see streaming
+  responses, review command/file approvals, and accept/decline using the
+  onscreen controls or virtual keys. **Real Codex may execute commands and
+  modify files according to its configured sandbox and approvals.**
 
-## Run it on Windows
+The Raspberry Pi is **not required**. Only the virtual 12-key UI is wired up;
+physical Pi networking is the later D2 milestone.
 
-Install Python 3.12 (3.10+ should work) and make sure the Python Launcher
-('py') is available. Clone and switch to the development branch:
+## Windows setup
 
-    git clone https://github.com/CDragu/keybow2040.git
-    cd keybow2040
-    git switch feature/windows-d0-simulator
-    .\desktop\run-windows.bat
+Install Python 3.12+ (with the \`py\` launcher), and install the Codex CLI using
+Node.js/npm. Sign in with the CLI:
 
-The launcher creates '.venv-desktop', installs PySide6, and starts the UI.
-From PowerShell, you may also do this manually:
+\`\`\`powershell
+npm install -g @openai/codex
+codex login
+codex --version
+\`\`\`
 
-    py -3 -m venv .venv-desktop
-    .\.venv-desktop\Scripts\python.exe -m pip install -r desktop\requirements.txt
-    .\.venv-desktop\Scripts\python.exe -m desktop
+Then clone/update this repo and launch the desktop:
 
-For other OSes, install 'desktop/requirements.txt' in a venv and run
-'python -m desktop' from the repository root. No installer/.exe yet.
+\`\`\`powershell
+git clone https://github.com/CDragu/keybow2040.git
+cd keybow2040
+git switch feature/d1-real-codex-appserver
+.\desktop\run-windows.bat
+\`\`\`
 
-## What to test
+If you already have a checkout, \`git fetch\` and
+\`git switch feature/d1-real-codex-appserver\` rather than cloning again.
+After the PR is merged, just \`git switch main\` and \`git pull\`.
 
-1. **Command approval:** select the default scenario, simulate turn, review the
-   pretend test command/working directory/reason; use **Approve once** on screen
-   or virtual key **0**. The status returns to working, then completes.
-2. **Approve for session:** virtual key **1** is available for simulated
-   command requests only (not for file-change approvals).
-3. **Decline:** key **2** stops the run with a failed state.
-4. **Cancel:** key **3** or Stop turn aborts active work or a pending approval.
-5. **Acknowledge:** key **4** or Acknowledge and reset makes the next prompt
-   available after any completed/failed/cancelled turn.
-6. **Multiple requests:** choose the Two approvals scenario. Each requires its
-   own review; old approval IDs cannot approve the next request.
-7. **Failure and no approval:** try each separate scenario. Enable
-   Auto-advance for a hands-free script, or disable it and click
-   Next simulated event to control each step.
+The launcher creates \`.venv-desktop\` and installs PySide6. If \`codex\` is
+not found on PATH, Real mode will display an error; close/reopen your
+terminal after installing npm global tools.
 
-The 12 virtual LEDs use dim blue for ready, pulsing amber for working, red
-for approval, green for completion and red for failure. All 12 keys are
-shown in the original Pi Keybow physical index order (9–11 top, 0–2 bottom).
+Manual setup:
 
-The activity log is local and ephemeral; the demo doesn't store prompts on
-disk. The system tray icon is shown when the desktop supports a tray. Closing
-the window quits the simulator.
+\`\`\`powershell
+py -3 -m venv .venv-desktop
+.\.venv-desktop\Scripts\python.exe -m pip install -r desktop\requirements.txt
+.\.venv-desktop\Scripts\python.exe -m desktop
+\`\`\`
+
+No .exe/installer is shipped yet.
+
+## Try a real Codex conversation safely
+
+1. Choose **Backend → Real Codex (local)**.
+2. Click **Choose folder…** and choose a project you own.
+3. Leave **Read-only (recommended)** selected.
+4. Enter **"Explain what this repository does without changing files."**
+5. Click **Send to Codex**. Wait for the actual response in **CODEX RESPONSE**.
+6. Choose **Acknowledge and reset** before the next turn. Follow-up prompts
+   in the same folder reuse the same Codex thread within the running app.
+
+Codex may perform read-only tool/command activity under its sandbox.
+For coding tasks you want Codex to edit, explicitly select **Workspace write**
+*before* starting the turn. This grants sandboxed write access to the
+selected project and may allow edits that do not individually require
+approval. \`approvalPolicy\` is always \`on-request\` (never bypass).
+
+When Codex sends a command/file approval request, the **red virtual keys**
+light up. Read the command, working directory, reason and proposed file
+change details; press virtual key 0 to approve once, key 1 for session **only
+when the server offers it**, or key 2 to decline. You can also use the
+onscreen buttons. Key 3 cancels the running turn, and key 4 acknowledges the
+final outcome. Unsupported request types are rejected, never auto-approved.
+
+A failed, cancelled, or disconnected turn must not leave a pending approval
+that can be accidentally accepted after reconnecting. The client binds each
+approval to the exact JSON-RPC ID, thread, turn and run generation; and
+disables approval until the UI has rendered the review card.
+
+**Limitations:** This is a first Codex integration. The real CLI has not
+been run interactively on your Windows computer yet; the protocol code is
+validated using a local fake App Server. Some newer approval types such as
+standalone permission-grant requests and MCP form elicitation are **rejected
+by this first version**, not presented as interactive grant dialogs. Real
+Codex mode does not integrate with the ChatGPT desktop UI directly.
+Stopping a turn can take time; the next turn stays blocked until the server
+finishes interrupting it.
+
+## Simulator scenarios (still available)
+
+In **Simulator (offline)** mode, choose a scenario from the dropdown:
+Command approval, File change approval, Two approvals, Success, or Failure.
+Enable Auto-advance or click **Next simulated event**. All actions are fake.
 
 ## Tests
 
-    .\.venv-desktop\Scripts\python.exe -m unittest discover -s desktop/tests -v
+\`\`\`powershell
+.\.venv-desktop\Scripts\python.exe -m unittest discover -s desktop/tests -v
+\`\`\`
 
-The core and scenario tests don't need Qt. UI tests use the Qt offscreen
-platform on Linux CI and exercise the actual widgets and approval buttons.
-Physical Windows interactive testing is still needed.
+GitHub Actions runs pure-Python core, Codex protocol and subprocess stdio
+tests on **Windows and Linux**; offscreen PySide6 UI tests run on Linux.
+Neither CI nor unit tests need an OpenAI login. Hardware/interactive testing
+is still required before calling D1 production-ready.
 
-## Architecture
+## Internal architecture
 
-- **core.py**: pure-Python state machine, LED representation, and approval
-  gate. A simulated key press must match the current run ID, request ID,
-  allowed decision and **already displayed** review card.
-- **simulator.py**: deterministic scripted requests and turn results.
-- **app.py**: PySide6 controls, timers, virtual device/LED animation, tray.
-- **tests/**: state transitions, stale requests, multiple approvals and UI.
+- \`core.py\`: shared session state and approval gate (validates request
+  identity, UI visibility, and allowed decisions).
+- \`simulator.py\`: deterministic offline Codex stand-in.
+- \`codex_backend.py\`: stdio JSON-RPC process manager and event parser. Uses
+  dedicated stdout/stderr threads; the Qt main loop drains a message queue.
+- \`app.py\`: mode selector, project chooser, read-only/workspace-write
+  selector, streaming reply panel, virtual keypad, approval review UI.
+- \`tests/\`: protocol and UI tests; a fake subprocess App Server confirms
+  newline-delimited JSON-RPC round trips.
 
-Next, D1 will replace the simulator adapter with a Codex App Server backend
-and explicit approval lifecycle. D2 will add the secure Pi link. Both should
-retain the same approval gate; D0 makes **no claims of real Codex support**.
-
-See [the desktop roadmap](../docs/windows-app-plan.md) for the full plan.
+Reference: [official Codex App Server documentation](https://learn.chatgpt.com/docs/app-server).
+D2 will pair the original Raspberry Pi Keybow with this desktop app.
