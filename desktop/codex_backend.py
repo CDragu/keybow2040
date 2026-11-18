@@ -58,12 +58,13 @@ class JsonRpcProcess:
                 errors="replace", bufsize=1, creationflags=flags)
         except (FileNotFoundError, OSError) as exc:
             raise CodexUnavailable(f"Unable to start Codex App Server: {exc}") from exc
-        threading.Thread(target=self._read_stdout, daemon=True).start()
-        threading.Thread(target=self._read_stderr, daemon=True).start()
+        proc = self.process
+        threading.Thread(target=self._read_stdout, args=(proc,), daemon=True).start()
+        threading.Thread(target=self._read_stderr, args=(proc,), daemon=True).start()
 
-    def _read_stdout(self):
+    def _read_stdout(self, proc):
         try:
-            for line in self.process.stdout:
+            for line in proc.stdout:
                 if len(line) > MAX_LINE:
                     self.events.put({"_transport_error": "Codex sent an oversized protocol message."})
                     break
@@ -83,9 +84,9 @@ class JsonRpcProcess:
             if not self._closing:
                 self.events.put({"_closed": True})
 
-    def _read_stderr(self):
+    def _read_stderr(self, proc):
         try:
-            for line in self.process.stderr:
+            for line in proc.stderr:
                 self.stderr_tail.append(line.rstrip()[:1000])
         except (OSError, UnicodeError):
             pass
@@ -146,6 +147,8 @@ def _allowed(params, method):
     """Never offer a permission not described by the server."""
     explicit = params.get("availableDecisions")
     choices = ("once", "decline")  # conservative fallback
+    if explicit is not None and not isinstance(explicit, list):
+        return ("decline",)
     if isinstance(explicit, list):
         wire_choices = set()
         for item in explicit:
@@ -427,7 +430,9 @@ class CodexBackend:
         details = ""
         network = params.get("networkApprovalContext")
         if isinstance(network, dict):
-            details = f"Network access: {network.get('protocol', '?')}://{network.get('host', '?')}"
+            details = (f"Network access: {network.get('protocol', '?')}://"
+                       f"{network.get('host', '?')}"
+                       + (f":{network['port']}" if network.get("port") else ""))
             command = ""  # not a general shell-command approval
         elif method == "item/fileChange/requestApproval":
             changes = item.get("changes") or []
@@ -438,6 +443,8 @@ class CodexBackend:
                     for c in changes[:20] if isinstance(c, dict))
             else:
                 details = "File change details are unavailable."
+            if params.get("grantRoot"):
+                details += f"\nRequested grant root: {params['grantRoot']}"
         else:
             details = (str(params.get("additionalPermissions") or "")
                        if params.get("additionalPermissions") else
