@@ -60,7 +60,7 @@ class BridgeTests(unittest.TestCase):
         self.bridge.tick()
         self.assertEqual(self.bridge.held, {0, 1, 5})
         self.assertEqual(self.client.sent[:3], [
-            (0, True, "abc", 1), (1, True, "abc", 1), (5, True, "abc", 1)])
+            (0, True, "abc", 1), (1, True, "abc", 1), (5, True, None, 1)])
         self.clock.advance()
         self.hw.emit(1, False)
         self.hw.emit(0, False)
@@ -114,13 +114,14 @@ class BridgeTests(unittest.TestCase):
         self.bridge.tick()
         self.assertEqual(self.bridge.effects.phase, "offline")
         self.assertIsNone(self.bridge.arm)
+        count = len(self.client.sent)
         self.clock.advance()
         self.hw.emit(0, False)
         self.bridge.tick()
         self.clock.advance()
         self.hw.emit(0, True)
         self.bridge.tick()
-        self.assertEqual(self.client.sent[-1][-2], None)
+        self.assertEqual(len(self.client.sent), count)
 
     def test_led_and_event_cues(self):
         self.client.events.put(("state", 1, {
