@@ -184,9 +184,14 @@ class CodexBackend:
         self.items = {}
         self.sandbox = "read-only"
         self.last_error = ""
+        self.inflight = False
 
     def start(self, prompt, sandbox="read-only"):
         if self.session.phase != Phase.IDLE or not prompt.strip():
+            return False
+        if self.inflight or any(tag in ('turn/start', 'turn/interrupt')
+                                for tag in self.callbacks.values()):
+            self.session._emit('Codex is still finishing the previous turn. Try again after it stops.')
             return False
         project = str(Path(self.session.project).resolve())
         if not Path(project).is_dir():
@@ -198,6 +203,7 @@ class CodexBackend:
             return False
         self.sandbox = sandbox
         self.turn_id = None
+        self.inflight = False
         self.active_approval = None
         self.pending_early.clear()
         self.items.clear()
@@ -239,6 +245,7 @@ class CodexBackend:
     def _start_turn(self):
         if self.session.phase != Phase.WORKING:
             return
+        self.inflight = True
         self._send("turn/start", {
             "threadId": self.thread_id,
             "input": [{"type": "text", "text": self.session.prompt}],
@@ -345,6 +352,7 @@ class CodexBackend:
             if not finished_id or (self.turn_id and finished_id != self.turn_id):
                 return
             status = turn.get("status", "failed")
+            self.inflight = False
             self.active_approval = None
             self.pending_early.clear()
             self.session.clear_approval()
@@ -488,6 +496,7 @@ class CodexBackend:
 
     def _fail(self, message):
         self.last_error = message
+        self.inflight = False
         self.active_approval = None
         self.pending_early.clear()
         self.callbacks.clear()
