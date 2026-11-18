@@ -1,4 +1,4 @@
-"""Launch the offline Keybow Codex Windows desktop simulator."""
+"""Launch the Keybow Codex desktop app."""
 from desktop.app import main
 
 if __name__ == "__main__":

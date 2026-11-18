@@ -51,7 +51,7 @@ def load_config(path, *, server=False):
 
 
 def create_pairing(windows_ip, windows_path=WINDOWS_CONFIG,
-                   pi_path=None, port=8765):
+                   pi_path=None, port=8765, *, bind_host="0.0.0.0"):
     if not windows_ip or not windows_ip.strip():
         raise ValueError("Provide the Windows LAN IP to which the Pi will connect.")
     if type(port) is not int or not 1 <= port <= 65535:
@@ -63,7 +63,7 @@ def create_pairing(windows_ip, windows_path=WINDOWS_CONFIG,
     if windows_path.exists() or pi_path.exists():
         raise FileExistsError("Pairing already exists. Move/remove the existing files explicitly before replacing it.")
     secret = secrets.token_hex(32)
-    write_config(windows_path, {"host": "0.0.0.0", "port": port, "key": secret})
+    write_config(windows_path, {"host": bind_host, "port": port, "key": secret})
     try:
         write_config(pi_path, {"host": windows_ip.strip(), "port": port, "key": secret})
     except BaseException:

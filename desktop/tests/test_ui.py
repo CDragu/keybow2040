@@ -42,7 +42,7 @@ class DesktopUiTests(unittest.TestCase):
         self.step()
         self.assertEqual(self.window.session.phase, Phase.APPROVAL)
         self.assertFalse(self.window.approval_card.isHidden())
-        self.assertIn("python", self.window.approval_command.text())
+        self.assertIn("python", self.window.approval_command.toPlainText())
         self.assertTrue(self.window.virtual_buttons[0].isEnabled())
         self.window.virtual_buttons[0].click()
         self.assertEqual(self.window.session.phase, Phase.WORKING)

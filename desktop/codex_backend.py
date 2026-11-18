@@ -9,12 +9,12 @@ import json
 import os
 from pathlib import Path
 import queue
-import shutil
 import sqlite3
 import subprocess
 import threading
 import time
 
+from desktop.codex_cli import find_codex, launch
 from desktop.core import ApprovalRequest, Phase
 
 APPROVAL_METHODS = {
@@ -64,15 +64,15 @@ class JsonRpcProcess:
             return
         command = self.command
         if command is None:
-            binary = shutil.which("codex")
+            binary = find_codex()
             if not binary:
                 raise CodexUnavailable(
-                    "Codex CLI not found on PATH. Install @openai/codex and run 'codex login'.")
+                    "Codex CLI was not found. Install it or select its location in Settings.")
             command = [binary, "app-server"]
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
         try:
-            self.process = self._popen(
-                command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            self.process = launch(
+                self._popen, command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE, text=True, encoding="utf-8",
                 errors="replace", bufsize=1, creationflags=flags)
         except (FileNotFoundError, OSError) as exc:
@@ -206,6 +206,7 @@ class CodexBackend:
         self.thread_id = None
         self.thread_project = None
         self.turn_id = None
+        self.turn_confirmed = False
         self.generation = 0
         self.active_approval = None
         self.seen_request_ids = set()
@@ -232,6 +233,7 @@ class CodexBackend:
             return False
         self.sandbox = sandbox
         self.turn_id = None
+        self.turn_confirmed = False
         self.inflight = False
         self.active_approval = None
         self.pending_early.clear()
@@ -247,7 +249,7 @@ class CodexBackend:
                     "clientInfo": {
                         "name": "keybow_codex_desktop",
                         "title": "Keybow Codex Desktop",
-                        "version": "0.2.0",
+                        "version": "0.4.0",
                     },
                 }, "initialize")
             elif self.thread_id and self.thread_project == project:
@@ -352,6 +354,7 @@ class CodexBackend:
                 self._fail("Turn ID mismatch; approvals disabled.")
                 return
             self.turn_id = returned_id
+            self.turn_confirmed = True
             if self.session.phase == Phase.CANCELLED and self.inflight:
                 self._send("turn/interrupt", {"threadId": self.thread_id,
                                                "turnId": self.turn_id}, "turn/interrupt")
@@ -386,7 +389,6 @@ class CodexBackend:
             if (turn_id and turn_id not in self.finished_turns and
                     self.turn_id is None and self.session.phase == Phase.WORKING):
                 self.turn_id = turn_id
-                self._drain_early()
             return
         turn_id = _id(params.get("turnId"))
         if method == "turn/completed":
@@ -460,7 +462,7 @@ class CodexBackend:
             self.transport.respond(rpc_id, {"decision": "decline"})
             return
         deadline = self.clock() + APPROVAL_TIMEOUT
-        if not self.turn_id and len(self.pending_early) < MAX_PENDING_REQUESTS:
+        if not self.turn_confirmed and len(self.pending_early) < MAX_PENDING_REQUESTS:
             self.pending_early.append((msg, deadline))
             return
         self._show_request(msg, deadline)
@@ -475,7 +477,7 @@ class CodexBackend:
         params = msg["params"]
         if (self.session_locked or self.clock() >= deadline
                 or self.session.phase != Phase.WORKING or self.active_approval
-                or params.get("threadId") != self.thread_id or not self.turn_id
+                or params.get("threadId") != self.thread_id or not self.turn_confirmed
                 or _id(params.get("turnId")) != self.turn_id):
             self.transport.respond(rpc_id, {"decision": "decline"})
             return
@@ -495,7 +497,8 @@ class CodexBackend:
             protocol = _text(network.get("protocol")) if isinstance(network, dict) else ""
             port = network.get("port") if isinstance(network, dict) else None
             valid = (method == "item/commandExecution/requestApproval" and host
-                     and protocol and (port is None or type(port) is int and 0 < port <= 65535))
+                     and protocol and not any(c.isspace() for c in host + protocol)
+                     and (port is None or type(port) is int and 0 < port <= 65535))
             details = (f"Network access: {protocol} to {host}"
                        + (f" on port {port}" if port is not None else "")
                        if valid else "Network destination is unavailable.")
@@ -505,6 +508,7 @@ class CodexBackend:
                      and bool(changes) and all(isinstance(change, dict)
                      and _text(change.get("path")) and isinstance(change.get("diff"), str)
                      for change in changes))
+            cwd = cwd or self.thread_project
             details = ("\n\n".join(
                 f"{change.get('kind', 'edit')}: {change['path']}\n{change['diff']}"
                 for change in changes) if valid else "File change details are unavailable.")
@@ -613,7 +617,7 @@ class CodexBackend:
             try:
                 for msg, _ in waiting:
                     self.transport.respond(msg["id"], {"decision": "cancel"})
-                if self.thread_id and self.turn_id and self.inflight:
+                if self.thread_id and self.turn_confirmed and self.inflight:
                     self._send("turn/interrupt", {"threadId": self.thread_id,
                                                    "turnId": self.turn_id}, "turn/interrupt")
             except (CodexUnavailable, OSError):
@@ -636,6 +640,7 @@ class CodexBackend:
         self.thread_id = None
         self.thread_project = None
         self.turn_id = None
+        self.turn_confirmed = False
         self.inflight = False
         self.pending_early.clear()
         self.finished_turns.clear()

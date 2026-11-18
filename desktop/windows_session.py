@@ -5,7 +5,7 @@ import sys
 
 WM_WTSSESSION_CHANGE = 0x02B1
 SESSION_LOCKED = {2, 4, 6, 7}  # console/remote disconnect, logoff, lock
-SESSION_UNLOCKED = {8}
+SESSION_UNLOCKED = {8, 15}  # unlock or the user desktop is ready
 
 
 class WindowsSession:

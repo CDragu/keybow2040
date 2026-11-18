@@ -1,4 +1,4 @@
-# D2 — Windows / original 12-key Pi Keybow pairing
+# Pair the original 12-key Pi Keybow with Windows
 
 This connects the **original Pi Zero WH Keybow** to the Windows desktop via
 authenticated local TCP. The Pi reads 12 independent switches and drives
@@ -16,23 +16,28 @@ RGB LEDs; it never runs Codex or receives prompts, commands or credentials.
 
 ## Windows setup
 
-From PowerShell, in the checkout (use main after the PR is merged):
+1. In Windows **Settings → Network & internet**, open the active adapter
+   and locate its IPv4 address. Use a trusted private network.
+2. In Keybow Codex, choose **Settings → Set up Pi pairing**. Enter the
+   Windows IPv4 address and TCP port (default 8765). Save the Pi export
+   to a private local folder. The listener binds to the selected address.
+3. Transfer the Pi export as described below and start the Pi bridge.
+   On Windows, click **Enable physical Pi link**.
+
+The desktop stores its credential in `%USERPROFILE%\.keybow2040\windows.json`
+with per-user Windows DPAPI protection. The Pi export needs to stay private
+until it is copied and deleted. Existing D2 credentials migrate on the first
+successful read by the Windows listener.
+
+For a source checkout, the existing command also creates pairing files:
 
 ~~~powershell
-git fetch
-git switch feature/d2-pi-windows-link-led-effects
 py -3 -m keybow_net.pairing create --windows-ip 192.168.1.23
 ~~~
 
-Replace 192.168.1.23 with your actual Windows LAN IPv4 address (ipconfig).
-
-This creates two files without printing the shared secret:
-
-- Windows listener: $HOME\.keybow2040\windows.json
-- Temporary Pi credential: $HOME\.keybow2040\pi-pairing.json
-
-The generator refuses to overwrite an existing pairing. Treat rotating a
-shared key as a deliberate re-pairing of both machines.
+Replace the example IP with your Windows LAN address. The generator refuses
+to overwrite an existing pairing. Stop the listener before archiving old
+files and creating new ones. Update the credential on both devices together.
 
 ## Copy credentials to Pi
 
@@ -43,7 +48,8 @@ mkdir -p ~/.keybow2040
 chmod 700 ~/.keybow2040
 ~~~
 
-From Windows PowerShell:
+Transfer the exported file over SSH with your usual SFTP client. For the
+default export location, the equivalent Windows PowerShell commands are:
 
 ~~~powershell
 scp "$HOME\.keybow2040\pi-pairing.json" pi@raspberrypi.local:~/.keybow2040/pi.json
@@ -58,22 +64,28 @@ chmod 600 ~/.keybow2040/pi.json
 
 Never put credentials in Git, email or shared folders.
 
-## Windows firewall
+## Windows Firewall
 
-If the Pi cannot connect, open elevated PowerShell and permit only Private
-network inbound TCP. Prefer specifying the Pi's IP with -RemoteAddress.
+On the Windows PC, use **Windows Defender Firewall with Advanced Security**
+from Start. Creating an inbound rule requires administrator rights.
 
-~~~powershell
-New-NetFirewallRule -DisplayName "Keybow Pi Link" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 8765 -Profile Private
-~~~
+1. Choose **Inbound Rules → New Rule → Custom**.
+2. Choose **This program path** and use
+   `%LOCALAPPDATA%\Programs\Keybow Codex\KeybowCodex.exe`, or the executable
+   in your chosen installation directory. For a source install, use the
+   Python executable running the desktop.
+3. Choose **TCP** and the pairing **local port** (8765 by default). Under
+   **Scope**, set the remote address to the Pi’s LAN IPv4 address.
+4. Choose **Allow the connection**, select **Private** as the profile,
+   and name it **Keybow Pi Link**.
 
-To remove: Remove-NetFirewallRule -DisplayName "Keybow Pi Link".
-Do not use a Public firewall rule or router port forwarding.
+If you uninstall Keybow Codex, remove this rule from **Inbound Rules**.
+Keep the listener on your trusted private LAN.
 
 ## Pi bridge
 
 Follow the original GPIO/SPI/keybow installation in
-[Pi setup](../pi/README.md). Pull the D2 branch on the Pi too.
+[Pi setup](../pi/README.md). Use a checkout containing the Pi bridge.
 Then from the repository root:
 
 ~~~bash

@@ -8,7 +8,8 @@ import socket
 import threading
 import time
 
-from keybow_net.pairing import WINDOWS_CONFIG, load_config
+from desktop.settings import load_windows_pairing
+from keybow_net.pairing import WINDOWS_CONFIG
 from keybow_net.protocol import (
     HEARTBEAT_INTERVAL, ProtocolError, server_handshake
 )
@@ -35,11 +36,14 @@ class KeybowServer:
     def start(self):
         if self.running:
             return
-        host, port, secret = load_config(self.config, server=True)
+        host, port, secret = load_windows_pairing(self.config)
         # Bind before starting thread to surface port/firewall errors in UI.
         listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
+            if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+                listener.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            else:
+                listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             listener.bind((host, port))
             listener.listen(1)
             listener.settimeout(0.25)

@@ -1,121 +1,89 @@
-# Keybow Codex Desktop — simulated and real Codex modes
+# Keybow Codex Desktop
 
-A Python/PySide6 Windows desktop app with an animated virtual **original
-12-key Keybow**. It supports two modes:
+Keybow Codex is a Windows desktop app for the original 12-key Keybow on a Pi
+Zero WH. It includes a virtual keypad, an offline simulator, and a connection to
+the local Codex CLI.
 
-- **Simulator (default)**: fully offline, scripted scenarios and no external
-  processes, file changes, or network.
-- **Real Codex**: launches your **installed Codex CLI** as a local
-  `codex app-server` process. You can send prompts to Codex, see streaming
-  responses, review command/file approvals, and accept/decline using the
-  onscreen controls or virtual keys. **Real Codex may execute commands and
-  modify files according to its configured sandbox and approvals.**
+## Install on Windows
 
-The Raspberry Pi is **optional**. The desktop still works without it, but D2 adds an opt-in authenticated TCP listener for a paired original 12-key Pi Zero WH. See [D2 pairing and LED effects](../docs/keybow-pairing.md).
+1. In [Windows desktop installer runs](https://github.com/CDragu/keybow2040/actions/workflows/windows-installer.yml), choose a successful run for the branch or revision you want. Download and unzip **Keybow-Codex-Windows-x64-unsigned**.
+2. Run `KeybowCodex-0.4.0-x64-Setup.exe`. The installer works per user and bundles Python and Qt. Select **Open Keybow Codex when I sign in to Windows** if you want the Start menu app to launch at sign-in. You can change this option by running the installer again.
+3. To use real Codex, install the [Codex CLI](https://github.com/openai/codex/releases) for your Windows architecture. For a standalone binary, extract it to a permanent folder and select the executable under **Settings → Choose Codex CLI**. Launch **Settings → Sign in to Codex** and finish sign-in in your browser. The CLI opens its own sign-in window. If you already signed in to the CLI, go directly to **Real Codex (local)**.
+4. For physical keys, use **Settings → Set up Pi pairing**. Follow [Pi pairing and Windows Firewall setup](../docs/keybow-pairing.md). The physical listener starts when you click **Enable physical Pi link**.
 
-## Windows setup
+The CI installer is unsigned. Windows may show an Unknown Publisher or SmartScreen
+prompt. Verify the GitHub Actions run and compare the SHA-256 of the downloaded
+installer with its accompanying `.sha256` file before running it. The checksum
+checks the file against that run. A signed distribution requires a publisher
+certificate and an Authenticode signing step.
 
-Install Python 3.12+ (with the `py` launcher), and install the Codex CLI using
-Node.js/npm. Sign in with the CLI:
+## Run a supervised turn
 
-```powershell
-npm install -g @openai/codex
-codex login
-codex --version
-```
+1. Choose **Real Codex (local)** and select a project folder you own.
+2. Leave **Read-only (recommended)** selected and ask “Explain what this project does without changing files.”
+3. When a review appears, read the working directory, reason, and command, diff, or network destination. Press key **0** to approve once, **1** when session approval is explicitly offered, or **2** to decline. The same choices are available on screen.
+4. Use key **3** or **Stop turn** to interrupt. Use key **4** or **Acknowledge and reset** after the result. Follow-up prompts in the same folder reuse the thread while the app is running.
 
-Then clone/update this repo and launch the desktop:
+Use **Workspace write** to allow Codex to write inside the chosen project under
+its sandbox. This mode can make in-sandbox edits without a separate prompt.
+Standalone permissions and MCP elicitation requests are rejected by the desktop.
 
-```powershell
-git clone https://github.com/CDragu/keybow2040.git
-cd keybow2040
-git switch main
-.\desktop\run-windows.bat
-```
+The physical review keys arm after the foreground card renders and the paired Pi
+reports its held keys. A disconnect or backgrounded window disarms the keypad.
+Reconnecting or returning to the window requires a fresh key-down. Windows lock
+declines the real pending request and blocks approvals until unlock. A real
+displayed request expires after two minutes. The desktop audit records time,
+request identity and kind, source, and decision in `approvals.sqlite3`.
 
-If you already have a checkout, `git fetch` and
-`git switch feature/d1-real-codex-appserver` rather than cloning again.
-After the PR is merged, just `git switch main` and `git pull`.
+## Troubleshooting
 
-The launcher creates `.venv-desktop` and installs PySide6. If `codex` is
-not found on PATH, Real mode will display an error; close/reopen your
-terminal after installing npm global tools.
+| Symptom | Check |
+| --- | --- |
+| Codex CLI was not found | Use **Settings → Choose Codex CLI**, then sign in. For npm installs, the app also checks the usual per-user npm directory. |
+| Pi stays disconnected | Confirm that both devices use the same trusted private LAN, the Pi bridge is running, and the private inbound firewall rule matches the executable and pairing port. |
+| Pairing says the Windows address is unavailable | Check the address of the active LAN adapter. If DHCP changed the address, reserve it on the router or create new pairing files and update the Pi. |
+| Physical approval is inactive | Put the desktop review in the foreground, unlock Windows, and release any held approval keys before pressing one. If the request expired or the turn stopped, wait for a new request. |
+| Windows pairing key cannot be read | Use the original Windows user profile. For a different profile or PC, archive the two pairing files and pair again. |
+| Preferences fail to load | Preserve the file for recovery. Open **Settings → Open data folder**, rename `settings.json`, and restart to use defaults. |
 
-Manual setup:
+**Settings → Open data folder** opens `%USERPROFILE%\.keybow2040`. Updates and
+uninstall preserve settings, pairing, and audit data. Existing D2 `windows.json`
+migrates to per-user Windows protection the first time the physical listener
+starts. The Pi's existing file continues to work. Preferences remember the project,
+backend, and optional CLI location. Each launch defaults to read-only and keeps
+the physical listener disabled.
 
-```powershell
-py -3 -m venv .venv-desktop
-.\.venv-desktop\Scripts\python.exe -m pip install -r desktop\requirements.txt
-.\.venv-desktop\Scripts\python.exe -m desktop
-```
+## Build and test from source
 
-No .exe/installer is shipped yet.
+For source development, launch `desktop\run-windows.bat` from a checkout. It
+sets up the desktop virtual environment. Choose **Simulator (offline)** to
+exercise the scripted approvals and status changes without a Pi or Codex login.
 
-## Try a real Codex conversation safely
-
-1. Choose **Backend → Real Codex (local)**.
-2. Click **Choose folder…** and choose a project you own.
-3. Leave **Read-only (recommended)** selected.
-4. Enter **"Explain what this repository does without changing files."**
-5. Click **Send to Codex**. Wait for the actual response in **CODEX RESPONSE**.
-6. Choose **Acknowledge and reset** before the next turn. Follow-up prompts
-   in the same folder reuse the same Codex thread within the running app.
-
-Codex may perform read-only tool/command activity under its sandbox.
-For coding tasks you want Codex to edit, explicitly select **Workspace write**
-*before* starting the turn. This grants sandboxed write access to the
-selected project and may allow edits that do not individually require
-approval. `approvalPolicy` is always `on-request` (never bypass).
-
-When Codex sends a command/file approval request, the **red virtual keys**
-light up. Read the command, working directory, reason and proposed file
-change details; press virtual key 0 to approve once, key 1 for session **only
-when the server offers it**, or key 2 to decline. You can also use the
-onscreen buttons. Key 3 cancels the running turn, and key 4 acknowledges the
-final outcome. Unsupported request types are rejected, never auto-approved.
-
-A failed, cancelled, or disconnected turn must not leave a pending approval
-that can be accidentally accepted after reconnecting. The client binds each
-approval to the exact JSON-RPC ID, thread, turn and run generation; and
-disables approval until the UI has rendered the review card.
-
-**Limitations:** This is a first Codex integration. The real CLI has not
-been run interactively on your Windows computer yet; the protocol code is
-validated using a local fake App Server. Some newer approval types such as
-standalone permission-grant requests and MCP form elicitation are **rejected
-by this first version**, not presented as interactive grant dialogs. Real
-Codex mode does not integrate with the ChatGPT desktop UI directly.
-Stopping a turn can take time; the next turn stays blocked until the server
-finishes interrupting it.
-
-## Simulator scenarios (still available)
-
-In **Simulator (offline)** mode, choose a scenario from the dropdown:
-Command approval, File change approval, Two approvals, Success, or Failure.
-Enable Auto-advance or click **Next simulated event**. All actions are fake.
-
-## Tests
+To build an x64 installer with Python 3.12 and Inno Setup 6 installed:
 
 ```powershell
-.\.venv-desktop\Scripts\python.exe -m unittest discover -s desktop/tests -v
+python -m pip install -r desktop/packaging/requirements.txt
+.\desktop\packaging\build-windows.ps1
 ```
 
-GitHub Actions runs pure-Python core, Codex protocol and subprocess stdio
-tests on **Windows and Linux**; offscreen PySide6 UI tests run on Linux.
-Neither CI nor unit tests need an OpenAI login. Hardware/interactive testing
-is still required before calling D1 production-ready.
+The build writes the installer and checksum under `dist\windows`. For a signed
+release, use the publisher certificate to sign the app executable and configure
+[Inno Setup SignTool](https://jrsoftware.org/ishelp/topic_setup_signtool.htm) for
+the installer and uninstaller. Generate the checksum after signing.
 
-## Internal architecture
+Run the full offscreen suite on Linux:
 
-- `core.py`: shared session state and approval gate (validates request
-  identity, UI visibility, and allowed decisions).
-- `simulator.py`: deterministic offline Codex stand-in.
-- `codex_backend.py`: stdio JSON-RPC process manager and event parser. Uses
-  dedicated stdout/stderr threads; the Qt main loop drains a message queue.
-- `app.py`: mode selector, project chooser, read-only/workspace-write
-  selector, streaming reply panel, virtual keypad, approval review UI.
-- `tests/`: protocol and UI tests; a fake subprocess App Server confirms
-  newline-delimited JSON-RPC round trips.
+```bash
+export QT_QPA_PLATFORM=offscreen
+python -m unittest discover -s desktop/tests -v
+python -m unittest discover -s keybow_net/tests -v
+python -m unittest discover -s pi/tests -v
+```
 
-Reference: [official Codex App Server documentation](https://learn.chatgpt.com/docs/app-server).
-The D2 Pi link is implemented but still requires physical-hardware/Windows network verification. Choose **Enable physical Pi link** under the virtual keypad after installing the pairing config in your user home directory.
+Windows CI builds, installs, starts, and uninstalls the package. For physical
+acceptance, run a live Codex turn from the Start menu on a clean Windows PC.
+Exercise two distinct requests, decline one, approve the other after reviewing
+it, and check the audit. Repeat with the Pi unplugged, Windows locked, a held key
+across reconnect, and Codex stopped midway through a request.
+
+Reference: [Codex App Server protocol](https://learn.chatgpt.com/docs/app-server).

@@ -271,6 +271,35 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(self.wire.responses,
                          [(55, {"decision": "decline"}), (56, {"decision": "decline"})])
 
+    def test_request_waits_for_the_matching_turn_start_response(self):
+        self.add_reply(1, {"userAgent": "fake"})
+        self.add_reply(2, {"thread": {"id": "thr-test"}})
+        self.wire.feed({"method": "turn/started", "params": {
+            "threadId": "thr-test", "turn": {"id": "turn-1"}}})
+        self.approval()
+        self.assertIsNone(self.session.request)
+        self.add_reply(3, {"turn": {"id": "turn-1"}})
+        self.assertEqual(self.session.phase, Phase.APPROVAL)
+
+    def test_old_token_cannot_approve_reused_rpc_id_after_restart(self):
+        self.ready_turn()
+        self.approval()
+        old_token = self.session.request.request_id
+        self.session.mark_presented(1, old_token)
+        self.wire.feed({"_closed": True})
+        self.backend.poll()
+        self.session.acknowledge()
+        self.assertTrue(self.backend.start("Restarted"))
+        self.wire = FakeTransport.instances[-1]
+        self.ready_turn()
+        self.approval()
+        new_token = self.session.request.request_id
+        self.session.mark_presented(2, new_token)
+        self.assertNotEqual(old_token, new_token)
+        self.assertFalse(self.backend.decide("once", 2, old_token))
+        self.assertTrue(self.backend.decide("once", 2, new_token))
+        self.assertEqual(self.wire.responses, [(55, {"decision": "accept"})])
+
     def test_audit_records_binding_and_source_without_review_contents(self):
         self.ready_turn()
         with tempfile.TemporaryDirectory() as folder:

@@ -2,22 +2,25 @@
 
 Run from repository root: python -m desktop
 """
+from ipaddress import IPv4Address
 import queue
 import secrets
 import sys
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QTimer, Qt
-from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPixmap
+from PySide6.QtCore import QEvent, QTimer, QUrl, Qt
+from PySide6.QtGui import QAction, QColor, QDesktopServices, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QFileDialog, QFrame,
-    QGridLayout, QHBoxLayout, QLabel, QListWidget, QMainWindow,
+    QGridLayout, QHBoxLayout, QInputDialog, QLabel, QListWidget, QMainWindow,
     QMenu, QMessageBox, QPlainTextEdit, QPushButton, QSystemTrayIcon, QVBoxLayout,
     QWidget,
 )
 
 from desktop.audit import ApprovalAudit
+from desktop.codex_cli import find_codex, start_login
+from desktop.settings import DesktopSettings, SETTINGS_FILE, pair_device
 from desktop.windows_session import (
     SESSION_LOCKED, SESSION_UNLOCKED, WM_WTSSESSION_CHANGE, WindowsSession,
 )
@@ -26,6 +29,7 @@ from desktop.codex_backend import CodexBackend
 from desktop.simulator import SCENARIOS, SimulatedCodex
 from desktop.pi_server import KeybowServer
 from keybow_net.effects import LightEngine
+from keybow_net.pairing import CONFIG_DIR
 
 
 APPROVAL_KEYS = {0: "once", 1: "session", 2: "decline"}
@@ -86,16 +90,26 @@ def button(text, style=None):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, *, audit=None):
+    def __init__(self, *, audit=None, settings_file=None):
         super().__init__()
         self._window_session = None
         self._session_locked = False
         self._approval_paint_pending = None
         self._pressed_approvals = {}
-        self.session = SessionController()
+        self._settings_file = settings_file
+        try:
+            self.settings = DesktopSettings.load(settings_file) if settings_file else DesktopSettings()
+            settings_error = ""
+        except (OSError, ValueError) as exc:
+            self.settings = DesktopSettings()
+            self._settings_file = None
+            settings_error = f"Preferences could not be read. Changes will apply for this run: {exc}"
+        home_project = str(Path.home()) if settings_file else None
+        self.session = SessionController(self.settings.project or home_project)
         self.backend = SimulatedCodex(self.session)
         self.real_backend = CodexBackend(self.session, audit=audit)
-        self.mode = "simulator"
+        self.mode = self.settings.backend
+        self._configure_codex()
         self.keybow_server = KeybowServer()
         self._physical_epoch = 0
         self._physical_snapshot = False
@@ -118,10 +132,13 @@ class MainWindow(QMainWindow):
         self.resize(1240, 810)
         self.setStyleSheet(STYLE)
         self._build()
+        self._make_menu()
         self._make_tray()
         self._window_session = WindowsSession(self.winId())
         if sys.platform == "win32" and not self._window_session.registered:
             self.session._emit("Windows session monitoring unavailable. Approval controls are disabled.")
+        if settings_error:
+            self.session._emit(settings_error)
         self.render()
         self.led_timer = QTimer(self)
         self.led_timer.setInterval(80)
@@ -181,7 +198,8 @@ class MainWindow(QMainWindow):
         self.prompt_edit.setPlaceholderText(
             "Describe a task. Real Codex can read and potentially modify your selected project."
         )
-        self.prompt_edit.setPlainText("Refactor the parser and run the unit tests")
+        if self.mode == "simulator":
+            self.prompt_edit.setPlainText("Refactor the parser and run the unit tests")
         self.prompt_edit.setMaximumHeight(112)
         prompt_layout.addWidget(self.prompt_edit)
         mode_line = QHBoxLayout()
@@ -189,6 +207,7 @@ class MainWindow(QMainWindow):
         self.mode_picker = QComboBox()
         self.mode_picker.addItem("Simulator (offline)", userData="simulator")
         self.mode_picker.addItem("Real Codex (local)", userData="real")
+        self.mode_picker.setCurrentIndex(self.mode_picker.findData(self.mode))
         mode_line.addWidget(self.mode_picker, 1)
         self.sandbox_picker = QComboBox()
         self.sandbox_picker.addItem("Read-only (recommended)", userData="read-only")
@@ -248,9 +267,10 @@ class MainWindow(QMainWindow):
         self.approval_description.setReadOnly(True)
         self.approval_description.setFixedHeight(92)
         approval_layout.addWidget(self.approval_description)
-        self.approval_command = label("")
-        self.approval_command.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        self.approval_command.setWordWrap(True)
+        self.approval_command = QPlainTextEdit()
+        self.approval_command.setReadOnly(True)
+        self.approval_command.setFixedHeight(58)
+        self.approval_command.setAccessibleName("Command preview")
         approval_layout.addWidget(self.approval_command)
         self.approval_cwd = label("", "muted")
         self.approval_cwd.setTextInteractionFlags(Qt.TextSelectableByMouse)
@@ -303,7 +323,7 @@ class MainWindow(QMainWindow):
         self.device_status = label("Virtual device: ready • no Pi connected", "muted")
         device_layout.addWidget(self.device_status)
         self.link_button = button("Enable physical Pi link")
-        self.link_button.setToolTip("Requires ~/.keybow2040/windows.json created by the pairing utility")
+        self.link_button.setToolTip("Set up a Pi from the Settings menu before enabling the link.")
         self.link_button.clicked.connect(self.toggle_pi_link)
         device_layout.addWidget(self.link_button)
         right.addWidget(device_card)
@@ -324,7 +344,95 @@ class MainWindow(QMainWindow):
         if self.mode != next_mode and next_mode != "real":
             self.real_backend.close()
         self.mode = next_mode
+        self.settings.backend = next_mode
+        self._save_settings()
         self.render()
+
+    def _make_menu(self):
+        settings = self.menuBar().addMenu("Settings")
+        self._cli_action = settings.addAction("Choose Codex CLI…", self._choose_codex)
+        if sys.platform == "win32":
+            settings.addAction("Sign in to Codex…", self._login)
+        settings.addAction("Set up Pi pairing…", self._pair_pi)
+        settings.addAction("Open data folder", self._open_data_folder)
+        help_menu = self.menuBar().addMenu("Help")
+        help_menu.addAction("Install and troubleshoot", lambda: QDesktopServices.openUrl(
+            QUrl("https://github.com/CDragu/keybow2040/blob/main/desktop/README.md")))
+
+    def _save_settings(self):
+        if self._settings_file is not None:
+            try:
+                self.settings.save(self._settings_file)
+            except OSError as exc:
+                self.session._emit(f"Could not save desktop preferences: {exc}")
+
+    def _configure_codex(self):
+        path = self.settings.codex_path
+        self.real_backend.command = [path, "app-server"] if path else None
+
+    def _choose_codex(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Choose Codex CLI", self.settings.codex_path,
+            "Codex executable or npm launcher (*.exe *.cmd)" if sys.platform == "win32" else "")
+        if path:
+            self.real_backend.close()
+            self.settings.codex_path = path
+            self._configure_codex()
+            self._save_settings()
+
+    def _login(self):
+        binary = self.settings.codex_path or find_codex()
+        if not binary:
+            QMessageBox.information(
+                self, "Codex CLI", "Install Codex CLI, then use Settings → Sign in to Codex."
+                "\n\nSee Help → Install and troubleshoot.")
+            return
+        try:
+            start_login(binary)
+        except OSError as exc:
+            QMessageBox.warning(self, "Codex sign-in", str(exc))
+
+    def _pair_pi(self):
+        if self.keybow_server.running:
+            QMessageBox.information(self, "Keybow pairing", "Disable the Pi link before pairing.")
+            return
+        ip, ok = QInputDialog.getText(self, "Keybow pairing", "Windows private LAN IPv4 address")
+        if not ok:
+            return
+        try:
+            address = IPv4Address(ip.strip())
+            if (address.is_unspecified or address.is_loopback or address.is_multicast
+                    or address.is_reserved or address.is_link_local):
+                raise ValueError("Enter the IPv4 address of your Windows LAN adapter.")
+        except ValueError as exc:
+            QMessageBox.warning(self, "Keybow pairing", str(exc))
+            return
+        port, ok = QInputDialog.getInt(self, "Keybow pairing", "TCP port", 8765, 1, 65535)
+        if not ok:
+            return
+        filename, _ = QFileDialog.getSaveFileName(
+            self, "Save the Pi pairing file", str(CONFIG_DIR / "pi-pairing.json"),
+            "JSON files (*.json)")
+        if not filename:
+            return
+        try:
+            path = pair_device(str(address), filename, port, self.keybow_server.config)
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, "Keybow pairing", str(exc))
+            return
+        QMessageBox.information(
+            self, "Keybow pairing",
+            f"Transfer {path} securely to ~/.keybow2040/pi.json on the Pi, then delete "
+            "the export from Windows. Start the Pi bridge and enable the Pi link. "
+            "See Help for the Windows Firewall rule.")
+
+    def _open_data_folder(self):
+        try:
+            CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            QMessageBox.warning(self, "Keybow data folder", str(exc))
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(CONFIG_DIR)))
 
     def _make_tray(self):
         if not QSystemTrayIcon.isSystemTrayAvailable():
@@ -342,7 +450,7 @@ class MainWindow(QMainWindow):
         painter.end()
         menu = QMenu(self)
         show_action = QAction("Show Keybow desktop", self)
-        show_action.triggered.connect(self.showNormal)
+        show_action.triggered.connect(self._show_from_tray)
         quit_action = QAction("Quit", self)
         quit_action.triggered.connect(self.close)
         menu.addAction(show_action)
@@ -350,14 +458,20 @@ class MainWindow(QMainWindow):
         self._tray = QSystemTrayIcon(QIcon(pixmap), self)
         self._tray.setToolTip("Keybow Codex Desktop")
         self._tray.setContextMenu(menu)
-        self._tray.activated.connect(lambda _: self.showNormal())
+        self._tray.activated.connect(lambda _: self._show_from_tray())
         self._tray.show()
+
+    def _show_from_tray(self):
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
 
     def choose_project(self):
         directory = QFileDialog.getExistingDirectory(
             self, "Select project folder", self.session.project)
-        if directory:
-            self.session.set_project(directory)
+        if directory and self.session.set_project(directory):
+            self.settings.project = directory
+            self._save_settings()
 
     def send_prompt(self):
         if self.mode == "real":
@@ -496,6 +610,8 @@ class MainWindow(QMainWindow):
         self.send_button.setText(
             "▶  Send to Codex" if self.mode == "real" else "▶  Simulate turn")
         self.mode_picker.setEnabled(phase == Phase.IDLE)
+        if hasattr(self, "_cli_action"):
+            self._cli_action.setEnabled(phase == Phase.IDLE)
         self.scenario_picker.setEnabled(self.mode == "simulator" and phase == Phase.IDLE)
         self.auto_play.setEnabled(self.mode == "simulator")
         self.sandbox_picker.setEnabled(self.mode == "real" and phase == Phase.IDLE)
@@ -532,7 +648,9 @@ class MainWindow(QMainWindow):
             self.approval_kind.setText(f"{request.kind}    ·    ID: {request.request_id}")
             if self.approval_description.toPlainText() != request.description:
                 self.approval_description.setPlainText(request.description)
-            self.approval_command.setText(f"Command: {request.command}" if request.command else "")
+            command_preview = f"Command: {request.command}" if request.command else ""
+            if self.approval_command.toPlainText() != command_preview:
+                self.approval_command.setPlainText(command_preview)
             self.approval_command.setVisible(bool(request.command))
             self.approval_cwd.setText(f"Working directory: {request.cwd}")
             self.approval_reason.setText(f"Reason: {request.reason}")
@@ -621,8 +739,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(
                 self, "Keybow Pi pairing",
                 f"Cannot start Pi link: {exc}\n\n"
-                "Create ~/.keybow2040/windows.json with the pairing utility. "
-                "See docs/keybow-pairing.md.")
+                "Use Settings → Set up Pi pairing. See Help for setup and troubleshooting.")
             return
         self._last_link_error = ""
         self.render()
@@ -792,10 +909,15 @@ class MainWindow(QMainWindow):
 
 
 def main():
-    app = QApplication(sys.argv)
+    smoke_test = sys.argv[1:] == ["--smoke-test"]
+    app = QApplication(sys.argv[:1] if smoke_test else sys.argv)
     app.setApplicationName("Keybow Codex Desktop")
-    window = MainWindow(audit=ApprovalAudit())
+    window = MainWindow(
+        audit=None if smoke_test else ApprovalAudit(),
+        settings_file=None if smoke_test else SETTINGS_FILE)
     window.show()
+    if smoke_test:
+        QTimer.singleShot(0, window, window.close)
     return app.exec()
 
 
