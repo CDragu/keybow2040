@@ -11,8 +11,7 @@ A Python/PySide6 Windows desktop app with an animated virtual **original
   onscreen controls or virtual keys. **Real Codex may execute commands and
   modify files according to its configured sandbox and approvals.**
 
-The Raspberry Pi is **not required**. Only the virtual 12-key UI is wired up;
-physical Pi networking is the later D2 milestone.
+The Raspberry Pi is **optional**. The desktop still works without it, but D2 adds an opt-in authenticated TCP listener for a paired original 12-key Pi Zero WH. See [D2 pairing and LED effects](../docs/keybow-pairing.md).
 
 ## Windows setup
 
@@ -30,7 +29,7 @@ Then clone/update this repo and launch the desktop:
 ```powershell
 git clone https://github.com/CDragu/keybow2040.git
 cd keybow2040
-git switch feature/d1-real-codex-appserver
+git switch main
 .\desktop\run-windows.bat
 ```
 
@@ -119,4 +118,4 @@ is still required before calling D1 production-ready.
   newline-delimited JSON-RPC round trips.
 
 Reference: [official Codex App Server documentation](https://learn.chatgpt.com/docs/app-server).
-D2 will pair the original Raspberry Pi Keybow with this desktop app.
+The D2 Pi link is implemented but still requires physical-hardware/Windows network verification. Choose **Enable physical Pi link** under the virtual keypad after installing the pairing config in your user home directory.
