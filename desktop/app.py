@@ -1,0 +1,424 @@
+"""Windows Keybow Codex D0 desktop prototype (PySide6, completely offline).
+
+Run from repository root: python -m desktop
+"""
+import math
+import sys
+import time
+from pathlib import Path
+
+from PySide6.QtCore import QTimer, Qt
+from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPixmap
+from PySide6.QtWidgets import (
+    QApplication, QCheckBox, QComboBox, QFileDialog, QFrame,
+    QGridLayout, QHBoxLayout, QLabel, QListWidget, QMainWindow,
+    QMenu, QPlainTextEdit, QPushButton, QSystemTrayIcon, QVBoxLayout,
+    QWidget,
+)
+
+from desktop.core import KEY_LABELS, TERMINAL, Phase, SessionController
+from desktop.simulator import SCENARIOS, SimulatedCodex
+
+
+STYLE = """
+QWidget { background: #0B1220; color: #E7EFFA; font-family: 'Segoe UI', Arial; font-size: 13px; }
+QFrame#card { background: #151F31; border: 1px solid #2B3B53; border-radius: 12px; }
+QLabel#brand { font-size: 23px; font-weight: 750; letter-spacing: 1px; }
+QLabel#section { font-size: 15px; font-weight: 650; }
+QLabel#muted { color: #96A8C1; }
+QLabel#status { color: #B3DAFF; font-size: 16px; font-weight: 650; }
+QLabel#badge { color: #E6BD69; background: #3B3021; border-radius: 6px; padding: 6px 10px; }
+QPlainTextEdit, QListWidget, QComboBox {
+    background: #0C1627; border: 1px solid #344660; border-radius: 8px;
+    padding: 8px; selection-background-color: #245B76;
+}
+QPlainTextEdit:focus, QComboBox:focus { border-color: #43BCD2; }
+QPushButton {
+    background: #263952; border: 1px solid #3C5472;
+    border-radius: 8px; padding: 9px 13px; font-weight: 600;
+}
+QPushButton:hover { background: #355376; }
+QPushButton:disabled { color: #657B97; background: #1A283B; border-color: #26384E; }
+QPushButton#primary { background: #087D9C; color: white; border-color: #0E9CBA; }
+QPushButton#primary:hover { background: #0A99B9; }
+QPushButton#danger { background: #542735; color: #FFDCE1; border-color: #88414D; }
+QPushButton#danger:hover { background: #71303F; }
+QCheckBox { spacing: 7px; color: #B8C9DE; }
+QScrollBar:vertical { width: 10px; background: #0C1627; }
+QScrollBar::handle:vertical { background: #39516C; border-radius: 5px; }
+"""
+
+
+def card():
+    panel = QFrame()
+    panel.setObjectName("card")
+    layout = QVBoxLayout(panel)
+    layout.setContentsMargins(19, 17, 19, 17)
+    layout.setSpacing(12)
+    return panel, layout
+
+
+def label(text, object_name=None):
+    item = QLabel(text)
+    if object_name:
+        item.setObjectName(object_name)
+    item.setWordWrap(True)
+    return item
+
+
+def button(text, style=None):
+    item = QPushButton(text)
+    if style:
+        item.setObjectName(style)
+    item.setCursor(Qt.PointingHandCursor)
+    return item
+
+
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.session = SessionController()
+        self.backend = SimulatedCodex(self.session)
+        self.session.subscribe(self.render)
+        self._shown_key = None
+        self._last_history_count = 0
+        self._tray = None
+        self.setWindowTitle("Keybow Codex • Offline simulator")
+        self.setMinimumSize(1000, 670)
+        self.resize(1240, 810)
+        self.setStyleSheet(STYLE)
+        self._build()
+        self._make_tray()
+        self.render()
+        self.led_timer = QTimer(self)
+        self.led_timer.setInterval(80)
+        self.led_timer.timeout.connect(self.paint_leds)
+        self.led_timer.start()
+
+    def _build(self):
+        root = QWidget()
+        self.setCentralWidget(root)
+        outer = QVBoxLayout(root)
+        outer.setContentsMargins(22, 20, 22, 20)
+        outer.setSpacing(16)
+
+        header = QHBoxLayout()
+        brand = QVBoxLayout()
+        brand.addWidget(label("KEYBOW  /  CODEX", "brand"))
+        brand.addWidget(label("Windows companion • offline interactive prototype", "muted"))
+        header.addLayout(brand, 1)
+        header.addWidget(label("SIMULATED — NO COMMANDS RUN", "badge"))
+        outer.addLayout(header)
+
+        project_card, project_row = card()
+        project_row.addWidget(label("ACTIVE PROJECT", "section"))
+        picker = QHBoxLayout()
+        self.project_label = label("", "muted")
+        self.project_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        picker.addWidget(self.project_label, 1)
+        self.pick_project = button("Choose folder…")
+        self.pick_project.clicked.connect(self.choose_project)
+        picker.addWidget(self.pick_project)
+        project_row.addLayout(picker)
+        outer.addWidget(project_card)
+
+        body = QHBoxLayout()
+        body.setSpacing(16)
+        outer.addLayout(body, 1)
+
+        left = QVBoxLayout()
+        left.setSpacing(16)
+        body.addLayout(left, 3)
+        right = QVBoxLayout()
+        right.setSpacing(16)
+        body.addLayout(right, 2)
+
+        prompt_card, prompt_layout = card()
+        prompt_layout.addWidget(label("TASK PROMPT", "section"))
+        self.prompt_edit = QPlainTextEdit()
+        self.prompt_edit.setPlaceholderText(
+            "Describe a task, e.g. 'Refactor the parser and add unit tests'.\n"
+            "This is a simulation; your text will not be sent anywhere."
+        )
+        self.prompt_edit.setPlainText("Refactor the parser and run the unit tests")
+        self.prompt_edit.setMaximumHeight(112)
+        prompt_layout.addWidget(self.prompt_edit)
+        scenario_line = QHBoxLayout()
+        scenario_line.addWidget(label("Scenario", "muted"))
+        self.scenario_picker = QComboBox()
+        for key, name in SCENARIOS.items():
+            self.scenario_picker.addItem(name, userData=key)
+        scenario_line.addWidget(self.scenario_picker, 1)
+        self.auto_play = QCheckBox("Auto-advance")
+        self.auto_play.setChecked(True)
+        scenario_line.addWidget(self.auto_play)
+        prompt_layout.addLayout(scenario_line)
+        action_line = QHBoxLayout()
+        self.send_button = button("▶  Simulate turn", "primary")
+        self.send_button.clicked.connect(self.send_prompt)
+        self.cancel_button = button("Stop turn", "danger")
+        self.cancel_button.clicked.connect(self.cancel_turn)
+        self.step_button = button("Next simulated event")
+        self.step_button.clicked.connect(self.advance)
+        action_line.addWidget(self.send_button)
+        action_line.addWidget(self.cancel_button)
+        action_line.addWidget(self.step_button)
+        prompt_layout.addLayout(action_line)
+        left.addWidget(prompt_card)
+
+        status_card, status_layout = card()
+        status_layout.addWidget(label("SESSION", "section"))
+        self.status_label = label("", "status")
+        status_layout.addWidget(self.status_label)
+        self.status_detail = label("", "muted")
+        status_layout.addWidget(self.status_detail)
+        self.ack_button = button("Acknowledge and reset")
+        self.ack_button.clicked.connect(self.acknowledge)
+        status_layout.addWidget(self.ack_button)
+        left.addWidget(status_card)
+
+        self.approval_card, approval_layout = card()
+        approval_layout.addWidget(label("⚠  APPROVAL REQUIRED", "section"))
+        self.approval_kind = label("")
+        approval_layout.addWidget(self.approval_kind)
+        self.approval_description = label("", "muted")
+        approval_layout.addWidget(self.approval_description)
+        self.approval_command = label("")
+        self.approval_command.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        approval_layout.addWidget(self.approval_command)
+        self.approval_cwd = label("", "muted")
+        self.approval_cwd.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        approval_layout.addWidget(self.approval_cwd)
+        self.approval_reason = label("", "muted")
+        approval_layout.addWidget(self.approval_reason)
+        choices = QHBoxLayout()
+        self.once_button = button("Approve once", "primary")
+        self.once_button.clicked.connect(lambda: self.approve("once"))
+        self.session_button = button("Approve for session")
+        self.session_button.clicked.connect(lambda: self.approve("session"))
+        self.decline_button = button("Decline", "danger")
+        self.decline_button.clicked.connect(lambda: self.approve("decline"))
+        for item in (self.once_button, self.session_button, self.decline_button):
+            choices.addWidget(item)
+        approval_layout.addLayout(choices)
+        left.addWidget(self.approval_card)
+        self.approval_card.hide()
+
+        log_card, log_layout = card()
+        log_layout.addWidget(label("ACTIVITY LOG", "section"))
+        self.history = QListWidget()
+        self.history.setMinimumHeight(120)
+        log_layout.addWidget(self.history)
+        left.addWidget(log_card, 1)
+
+        device_card, device_layout = card()
+        device_layout.addWidget(label("VIRTUAL KEYBOW", "section"))
+        device_layout.addWidget(
+            label("12-key Pi Zero layout • click the simulated physical keys", "muted"))
+        keys = QGridLayout()
+        keys.setSpacing(9)
+        self.virtual_buttons = {}
+        arrangement = ((9, 10, 11), (6, 7, 8), (3, 4, 5), (0, 1, 2))
+        for row, indices in enumerate(arrangement):
+            for col, index in enumerate(indices):
+                key_name = KEY_LABELS.get(index, "Reserved")
+                key = QPushButton(f"●  {index:02d}\n{key_name}")
+                key.setMinimumHeight(82)
+                key.setToolTip(f"Virtual Keybow key {index}: {key_name}")
+                key.clicked.connect(lambda _checked=False, n=index: self.press_virtual(n))
+                keys.addWidget(key, row, col)
+                self.virtual_buttons[index] = key
+        device_layout.addLayout(keys)
+        self.device_status = label("Virtual device: ready • no Pi connected", "muted")
+        device_layout.addWidget(self.device_status)
+        right.addWidget(device_card)
+
+        guide_card, guide_layout = card()
+        guide_layout.addWidget(label("HOW TO TEST", "section"))
+        guide_layout.addWidget(label(
+            "1. Choose a scenario and simulate a turn.\n\n"
+            "2. When approval appears, inspect the command, folder and reason.\n\n"
+            "3. Use the virtual red keys or the approval buttons.\n\n"
+            "4. Test decline, cancel, failure and two approvals.\n\n"
+            "5. Acknowledge the result to start again.", "muted"))
+        right.addWidget(guide_card)
+        right.addStretch(1)
+
+    def _make_tray(self):
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            return
+        pixmap = QPixmap(32, 32)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        painter.setBrush(QColor("#11A5C2"))
+        painter.setPen(Qt.NoPen)
+        painter.drawRoundedRect(2, 2, 28, 28, 7, 7)
+        painter.setBrush(QColor("#07111D"))
+        for x in (8, 16, 24):
+            for y in (8, 16, 24):
+                painter.drawEllipse(x - 2, y - 2, 4, 4)
+        painter.end()
+        menu = QMenu(self)
+        show_action = QAction("Show simulator", self)
+        show_action.triggered.connect(self.showNormal)
+        quit_action = QAction("Quit", self)
+        quit_action.triggered.connect(self.close)
+        menu.addAction(show_action)
+        menu.addAction(quit_action)
+        self._tray = QSystemTrayIcon(QIcon(pixmap), self)
+        self._tray.setToolTip("Keybow Codex — simulated")
+        self._tray.setContextMenu(menu)
+        self._tray.activated.connect(lambda _: self.showNormal())
+        self._tray.show()
+
+    def choose_project(self):
+        directory = QFileDialog.getExistingDirectory(
+            self, "Select project folder", self.session.project)
+        if directory:
+            self.session.set_project(directory)
+
+    def send_prompt(self):
+        if self.backend.start(self.prompt_edit.toPlainText(),
+                              self.scenario_picker.currentData()):
+            self._schedule_auto()
+
+    def _schedule_auto(self):
+        if not self.auto_play.isChecked() or self.session.phase != Phase.WORKING:
+            return
+        run_id = self.session.run_id
+        QTimer.singleShot(850, lambda: self._auto_advance(run_id))
+
+    def _auto_advance(self, run_id):
+        if self.session.run_id == run_id and self.session.phase == Phase.WORKING:
+            self.advance()
+
+    def advance(self):
+        self.backend.advance()
+
+    def _current_token(self):
+        return self._shown_key
+
+    def approve(self, choice):
+        token = self._current_token()
+        if token and self.session.decide(choice, *token):
+            self._schedule_auto()
+
+    def press_virtual(self, index):
+        token = self._current_token()
+        if index in (0, 1, 2) and token:
+            changed = self.session.virtual_key(index, *token)
+        else:
+            changed = self.session.virtual_key(index)
+        if changed:
+            self._schedule_auto()
+
+    def cancel_turn(self):
+        self.session.cancel()
+
+    def acknowledge(self):
+        self.session.acknowledge()
+
+    def render(self):
+        phase = self.session.phase
+        self.project_label.setText(self.session.project)
+        self.status_label.setText(phase.value)
+        detail = self.session.outcome or (
+            f"Simulated turn #{self.session.run_id} — no real Codex process."
+            if phase != Phase.IDLE else "Ready to preview an interaction offline.")
+        self.status_detail.setText(detail)
+        self.pick_project.setEnabled(phase == Phase.IDLE)
+        self.scenario_picker.setEnabled(phase == Phase.IDLE)
+        self.prompt_edit.setEnabled(phase == Phase.IDLE)
+        self.send_button.setEnabled(phase == Phase.IDLE and
+                                    bool(self.prompt_edit.toPlainText().strip()))
+        self.cancel_button.setEnabled(phase in (Phase.WORKING, Phase.APPROVAL))
+        self.step_button.setEnabled(phase == Phase.WORKING)
+        self.ack_button.setEnabled(phase in TERMINAL)
+
+        request = self.session.request if phase == Phase.APPROVAL else None
+        self.approval_card.setVisible(request is not None)
+        if request:
+            key = (self.session.run_id, request.request_id)
+            self.approval_kind.setText(f"{request.kind}    ·    ID: {request.request_id}")
+            self.approval_description.setText(request.description)
+            self.approval_command.setText(
+                f"Command: {request.command}" if request.command
+                else "No shell command — review the proposed file changes.")
+            self.approval_cwd.setText(f"Working directory: {request.cwd}")
+            self.approval_reason.setText(f"Reason: {request.reason}")
+            if self._shown_key != key:
+                self._shown_key = key
+                # First allow the review card to enter the event loop. This
+                # prevents an event queued before it was shown from approving.
+                QTimer.singleShot(
+                    0, lambda run_id=key[0], request_id=key[1]:
+                    self.session.mark_presented(run_id, request_id))
+            actionable = self.session.presented == key
+            self.once_button.setEnabled(actionable and "once" in request.allowed)
+            self.session_button.setEnabled(actionable and "session" in request.allowed)
+            self.decline_button.setEnabled(actionable and "decline" in request.allowed)
+        else:
+            self._shown_key = None
+
+        for i, key in self.virtual_buttons.items():
+            if i in (0, 1, 2):
+                names = {0: "once", 1: "session", 2: "decline"}
+                enabled = bool(
+                    request and self.session.presented == self._shown_key
+                    and names[i] in request.allowed
+                )
+            elif i == 3:
+                enabled = phase in (Phase.WORKING, Phase.APPROVAL)
+            elif i == 4:
+                enabled = phase in TERMINAL
+            else:
+                enabled = False
+            key.setEnabled(enabled)
+
+        if self._last_history_count > len(self.session.history):
+            self.history.clear()
+            self._last_history_count = 0
+        for message in self.session.history[self._last_history_count:]:
+            self.history.addItem(message)
+        self._last_history_count = len(self.session.history)
+        self.history.scrollToBottom()
+        self.paint_leds()
+
+    def paint_leds(self):
+        now = time.monotonic()
+        leds = self.session.leds()
+        for index, led in enumerate(leds):
+            if led.mode == "pulse":
+                intensity = 0.32 + 0.68 * (0.5 + 0.5 * math.sin(now * 4.5))
+            elif led.mode == "blink":
+                intensity = 1.0 if int(now * 3) % 2 else 0.15
+            else:
+                intensity = 1.0
+            color = tuple(max(0, min(255, int(c * intensity))) for c in led.rgb)
+            rgb = "#{:02x}{:02x}{:02x}".format(*color)
+            self.virtual_buttons[index].setStyleSheet(
+                "QPushButton {"
+                f"background-color: {rgb}; border: 1px solid #536781;"
+                "border-radius: 11px; color: #FFFFFF; font-weight: 650;"
+                "padding: 7px; text-align: center;"
+                "}"
+                "QPushButton:hover {border: 2px solid #D5F6FF;}"
+                "QPushButton:disabled {color: #D4DFEF;}"
+            )
+
+    def closeEvent(self, event):
+        if self._tray:
+            self._tray.hide()
+        super().closeEvent(event)
+
+
+def main():
+    app = QApplication(sys.argv)
+    app.setApplicationName("Keybow Codex Simulator")
+    window = MainWindow()
+    window.show()
+    return app.exec()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
