@@ -71,7 +71,7 @@ class RealModeUiTests(unittest.TestCase):
         self.app.processEvents()
         self.assertEqual(self.window.session.phase, Phase.APPROVAL)
         self.assertFalse(self.window.session_button.isEnabled())
-        self.assertIn("echo safe", self.window.approval_command.text())
+        self.assertIn("echo safe", self.window.approval_command.toPlainText())
         self.window.virtual_buttons[0].click()
         self.assertEqual(self.window.session.phase, Phase.WORKING)
         self.assertEqual(FakeTransport.instances[-1].responses,

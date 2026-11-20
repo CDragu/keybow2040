@@ -4,6 +4,7 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication
 
 from desktop.app import MainWindow
@@ -34,14 +35,14 @@ class DesktopUiTests(unittest.TestCase):
 
     def step(self):
         self.window.step_button.click()
-        self.app.processEvents()
+        QTest.qWait(50)
 
     def test_command_approval_via_virtual_key(self):
         self.start("command")
         self.step()
         self.assertEqual(self.window.session.phase, Phase.APPROVAL)
         self.assertFalse(self.window.approval_card.isHidden())
-        self.assertIn("python", self.window.approval_command.text())
+        self.assertIn("python", self.window.approval_command.toPlainText())
         self.assertTrue(self.window.virtual_buttons[0].isEnabled())
         self.window.virtual_buttons[0].click()
         self.assertEqual(self.window.session.phase, Phase.WORKING)
@@ -55,7 +56,7 @@ class DesktopUiTests(unittest.TestCase):
         self.step()
         self.assertEqual(self.window.session.phase, Phase.APPROVAL)
         self.assertFalse(self.window.session_button.isEnabled())
-        self.assertIn("parser", self.window.approval_description.text())
+        self.assertIn("parser", self.window.approval_description.toPlainText())
         self.window.decline_button.click()
         self.assertEqual(self.window.session.phase, Phase.FAILED)
         self.assertTrue(self.window.approval_card.isHidden())

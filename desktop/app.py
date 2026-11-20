@@ -2,27 +2,37 @@
 
 Run from repository root: python -m desktop
 """
+from ipaddress import IPv4Address
 import queue
 import secrets
 import sys
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QTimer, Qt
-from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPixmap
+from PySide6.QtCore import QEvent, QTimer, QUrl, Qt
+from PySide6.QtGui import QAction, QColor, QDesktopServices, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QFileDialog, QFrame,
-    QGridLayout, QHBoxLayout, QLabel, QListWidget, QMainWindow,
+    QGridLayout, QHBoxLayout, QInputDialog, QLabel, QListWidget, QMainWindow,
     QMenu, QMessageBox, QPlainTextEdit, QPushButton, QSystemTrayIcon, QVBoxLayout,
     QWidget,
 )
 
+from desktop.audit import ApprovalAudit
+from desktop.codex_cli import find_codex, start_login
+from desktop.settings import DesktopSettings, SETTINGS_FILE, pair_device
+from desktop.windows_session import (
+    SESSION_LOCKED, SESSION_UNLOCKED, WM_WTSSESSION_CHANGE, WindowsSession,
+)
 from desktop.core import KEY_LABELS, TERMINAL, Phase, SessionController
 from desktop.codex_backend import CodexBackend
 from desktop.simulator import SCENARIOS, SimulatedCodex
 from desktop.pi_server import KeybowServer
 from keybow_net.effects import LightEngine
+from keybow_net.pairing import CONFIG_DIR
 
+
+APPROVAL_KEYS = {0: "once", 1: "session", 2: "decline"}
 
 STYLE = """
 QWidget { background: #0B1220; color: #E7EFFA; font-family: 'Segoe UI', Arial; font-size: 13px; }
@@ -64,6 +74,7 @@ def card():
 
 def label(text, object_name=None):
     item = QLabel(text)
+    item.setTextFormat(Qt.PlainText)
     if object_name:
         item.setObjectName(object_name)
     item.setWordWrap(True)
@@ -79,14 +90,29 @@ def button(text, style=None):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self):
+    def __init__(self, *, audit=None, settings_file=None):
         super().__init__()
-        self.session = SessionController()
+        self._window_session = None
+        self._session_locked = False
+        self._approval_paint_pending = None
+        self._pressed_approvals = {}
+        self._settings_file = settings_file
+        try:
+            self.settings = DesktopSettings.load(settings_file) if settings_file else DesktopSettings()
+            settings_error = ""
+        except (OSError, ValueError) as exc:
+            self.settings = DesktopSettings()
+            self._settings_file = None
+            settings_error = f"Preferences could not be read. Changes will apply for this run: {exc}"
+        home_project = str(Path.home()) if settings_file else None
+        self.session = SessionController(self.settings.project or home_project)
         self.backend = SimulatedCodex(self.session)
-        self.real_backend = CodexBackend(self.session)
-        self.mode = "simulator"
+        self.real_backend = CodexBackend(self.session, audit=audit)
+        self.mode = self.settings.backend
+        self._configure_codex()
         self.keybow_server = KeybowServer()
         self._physical_epoch = 0
+        self._physical_snapshot = False
         self._physical_held = set()
         self._pending_physical = None
         self._ambiguous_chord = False
@@ -106,7 +132,13 @@ class MainWindow(QMainWindow):
         self.resize(1240, 810)
         self.setStyleSheet(STYLE)
         self._build()
+        self._make_menu()
         self._make_tray()
+        self._window_session = WindowsSession(self.winId())
+        if sys.platform == "win32" and not self._window_session.registered:
+            self.session._emit("Windows session monitoring unavailable. Approval controls are disabled.")
+        if settings_error:
+            self.session._emit(settings_error)
         self.render()
         self.led_timer = QTimer(self)
         self.led_timer.setInterval(80)
@@ -166,7 +198,8 @@ class MainWindow(QMainWindow):
         self.prompt_edit.setPlaceholderText(
             "Describe a task. Real Codex can read and potentially modify your selected project."
         )
-        self.prompt_edit.setPlainText("Refactor the parser and run the unit tests")
+        if self.mode == "simulator":
+            self.prompt_edit.setPlainText("Refactor the parser and run the unit tests")
         self.prompt_edit.setMaximumHeight(112)
         prompt_layout.addWidget(self.prompt_edit)
         mode_line = QHBoxLayout()
@@ -174,6 +207,7 @@ class MainWindow(QMainWindow):
         self.mode_picker = QComboBox()
         self.mode_picker.addItem("Simulator (offline)", userData="simulator")
         self.mode_picker.addItem("Real Codex (local)", userData="real")
+        self.mode_picker.setCurrentIndex(self.mode_picker.findData(self.mode))
         mode_line.addWidget(self.mode_picker, 1)
         self.sandbox_picker = QComboBox()
         self.sandbox_picker.addItem("Read-only (recommended)", userData="read-only")
@@ -194,7 +228,7 @@ class MainWindow(QMainWindow):
         self.send_button = button("▶  Simulate turn", "primary")
         self.send_button.clicked.connect(self.send_prompt)
         self.cancel_button = button("Stop turn", "danger")
-        self.cancel_button.clicked.connect(self.cancel_turn)
+        self.cancel_button.clicked.connect(lambda: self.cancel_turn())
         self.step_button = button("Next simulated event")
         self.step_button.clicked.connect(self.advance)
         action_line.addWidget(self.send_button)
@@ -225,13 +259,18 @@ class MainWindow(QMainWindow):
         left.addWidget(reply_card)
 
         self.approval_card, approval_layout = card()
+        self.approval_card.installEventFilter(self)
         approval_layout.addWidget(label("⚠  APPROVAL REQUIRED", "section"))
         self.approval_kind = label("")
         approval_layout.addWidget(self.approval_kind)
-        self.approval_description = label("", "muted")
+        self.approval_description = QPlainTextEdit()
+        self.approval_description.setReadOnly(True)
+        self.approval_description.setFixedHeight(92)
         approval_layout.addWidget(self.approval_description)
-        self.approval_command = label("")
-        self.approval_command.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.approval_command = QPlainTextEdit()
+        self.approval_command.setReadOnly(True)
+        self.approval_command.setFixedHeight(58)
+        self.approval_command.setAccessibleName("Command preview")
         approval_layout.addWidget(self.approval_command)
         self.approval_cwd = label("", "muted")
         self.approval_cwd.setTextInteractionFlags(Qt.TextSelectableByMouse)
@@ -240,15 +279,15 @@ class MainWindow(QMainWindow):
         approval_layout.addWidget(self.approval_reason)
         choices = QHBoxLayout()
         self.once_button = button("Approve once", "primary")
-        self.once_button.clicked.connect(lambda: self.approve("once"))
+        self._bind_decision(self.once_button, "once")
         self.session_button = button("Approve for session")
-        self.session_button.clicked.connect(lambda: self.approve("session"))
+        self._bind_decision(self.session_button, "session")
         self.decline_button = button("Decline", "danger")
-        self.decline_button.clicked.connect(lambda: self.approve("decline"))
+        self._bind_decision(self.decline_button, "decline")
         for item in (self.once_button, self.session_button, self.decline_button):
             choices.addWidget(item)
         approval_layout.addLayout(choices)
-        left.addWidget(self.approval_card)
+        left.insertWidget(0, self.approval_card)
         self.approval_card.hide()
 
         log_card, log_layout = card()
@@ -272,7 +311,10 @@ class MainWindow(QMainWindow):
                 key = QPushButton(f"●  {index:02d}\n{key_name}")
                 key.setMinimumHeight(82)
                 key.setToolTip(f"Virtual Keybow key {index}: {key_name}")
-                key.clicked.connect(lambda _checked=False, n=index: self.press_virtual(n))
+                if index in APPROVAL_KEYS:
+                    self._bind_decision(key, APPROVAL_KEYS[index], "virtual key")
+                else:
+                    key.clicked.connect(lambda _checked=False, n=index: self.press_virtual(n))
                 key.pressed.connect(lambda n=index: self._virtual_edge(n, True))
                 key.released.connect(lambda n=index: self._virtual_edge(n, False))
                 keys.addWidget(key, row, col)
@@ -281,7 +323,7 @@ class MainWindow(QMainWindow):
         self.device_status = label("Virtual device: ready • no Pi connected", "muted")
         device_layout.addWidget(self.device_status)
         self.link_button = button("Enable physical Pi link")
-        self.link_button.setToolTip("Requires ~/.keybow2040/windows.json created by the pairing utility")
+        self.link_button.setToolTip("Set up a Pi from the Settings menu before enabling the link.")
         self.link_button.clicked.connect(self.toggle_pi_link)
         device_layout.addWidget(self.link_button)
         right.addWidget(device_card)
@@ -302,7 +344,95 @@ class MainWindow(QMainWindow):
         if self.mode != next_mode and next_mode != "real":
             self.real_backend.close()
         self.mode = next_mode
+        self.settings.backend = next_mode
+        self._save_settings()
         self.render()
+
+    def _make_menu(self):
+        settings = self.menuBar().addMenu("Settings")
+        self._cli_action = settings.addAction("Choose Codex CLI…", self._choose_codex)
+        if sys.platform == "win32":
+            settings.addAction("Sign in to Codex…", self._login)
+        settings.addAction("Set up Pi pairing…", self._pair_pi)
+        settings.addAction("Open data folder", self._open_data_folder)
+        help_menu = self.menuBar().addMenu("Help")
+        help_menu.addAction("Install and troubleshoot", lambda: QDesktopServices.openUrl(
+            QUrl("https://github.com/CDragu/keybow2040/blob/main/desktop/README.md")))
+
+    def _save_settings(self):
+        if self._settings_file is not None:
+            try:
+                self.settings.save(self._settings_file)
+            except OSError as exc:
+                self.session._emit(f"Could not save desktop preferences: {exc}")
+
+    def _configure_codex(self):
+        path = self.settings.codex_path
+        self.real_backend.command = [path, "app-server"] if path else None
+
+    def _choose_codex(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Choose Codex CLI", self.settings.codex_path,
+            "Codex executable or npm launcher (*.exe *.cmd)" if sys.platform == "win32" else "")
+        if path:
+            self.real_backend.close()
+            self.settings.codex_path = path
+            self._configure_codex()
+            self._save_settings()
+
+    def _login(self):
+        binary = self.settings.codex_path or find_codex()
+        if not binary:
+            QMessageBox.information(
+                self, "Codex CLI", "Install Codex CLI, then use Settings → Sign in to Codex."
+                "\n\nSee Help → Install and troubleshoot.")
+            return
+        try:
+            start_login(binary)
+        except OSError as exc:
+            QMessageBox.warning(self, "Codex sign-in", str(exc))
+
+    def _pair_pi(self):
+        if self.keybow_server.running:
+            QMessageBox.information(self, "Keybow pairing", "Disable the Pi link before pairing.")
+            return
+        ip, ok = QInputDialog.getText(self, "Keybow pairing", "Windows private LAN IPv4 address")
+        if not ok:
+            return
+        try:
+            address = IPv4Address(ip.strip())
+            if (address.is_unspecified or address.is_loopback or address.is_multicast
+                    or address.is_reserved or address.is_link_local):
+                raise ValueError("Enter the IPv4 address of your Windows LAN adapter.")
+        except ValueError as exc:
+            QMessageBox.warning(self, "Keybow pairing", str(exc))
+            return
+        port, ok = QInputDialog.getInt(self, "Keybow pairing", "TCP port", 8765, 1, 65535)
+        if not ok:
+            return
+        filename, _ = QFileDialog.getSaveFileName(
+            self, "Save the Pi pairing file", str(CONFIG_DIR / "pi-pairing.json"),
+            "JSON files (*.json)")
+        if not filename:
+            return
+        try:
+            path = pair_device(str(address), filename, port, self.keybow_server.config)
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, "Keybow pairing", str(exc))
+            return
+        QMessageBox.information(
+            self, "Keybow pairing",
+            f"Transfer {path} securely to ~/.keybow2040/pi.json on the Pi, then delete "
+            "the export from Windows. Start the Pi bridge and enable the Pi link. "
+            "See Help for the Windows Firewall rule.")
+
+    def _open_data_folder(self):
+        try:
+            CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            QMessageBox.warning(self, "Keybow data folder", str(exc))
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(CONFIG_DIR)))
 
     def _make_tray(self):
         if not QSystemTrayIcon.isSystemTrayAvailable():
@@ -320,7 +450,7 @@ class MainWindow(QMainWindow):
         painter.end()
         menu = QMenu(self)
         show_action = QAction("Show Keybow desktop", self)
-        show_action.triggered.connect(self.showNormal)
+        show_action.triggered.connect(self._show_from_tray)
         quit_action = QAction("Quit", self)
         quit_action.triggered.connect(self.close)
         menu.addAction(show_action)
@@ -328,14 +458,20 @@ class MainWindow(QMainWindow):
         self._tray = QSystemTrayIcon(QIcon(pixmap), self)
         self._tray.setToolTip("Keybow Codex Desktop")
         self._tray.setContextMenu(menu)
-        self._tray.activated.connect(lambda _: self.showNormal())
+        self._tray.activated.connect(lambda _: self._show_from_tray())
         self._tray.show()
+
+    def _show_from_tray(self):
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
 
     def choose_project(self):
         directory = QFileDialog.getExistingDirectory(
             self, "Select project folder", self.session.project)
-        if directory:
-            self.session.set_project(directory)
+        if directory and self.session.set_project(directory):
+            self.settings.project = directory
+            self._save_settings()
 
     def send_prompt(self):
         if self.mode == "real":
@@ -363,41 +499,99 @@ class MainWindow(QMainWindow):
     def _current_token(self):
         return self._shown_key
 
-    def approve(self, choice):
-        token = self._current_token()
-        if not token:
+    def _bind_decision(self, widget, choice, source="desktop"):
+        widget.pressed.connect(lambda: self._pressed_approvals.__setitem__(
+            widget, self._current_token()))
+        widget.clicked.connect(lambda: self.approve(
+            choice, self._pressed_approvals.pop(widget, None), source))
+
+    def _review_visible(self):
+        return (not self._session_locked and self.isVisible() and not self.isMinimized()
+                and self.isActiveWindow() and self.approval_card.isVisible()
+                and not self.approval_card.visibleRegion().isEmpty()
+                and self._window_session is not None and self._window_session.is_foreground())
+
+    def _mark_painted(self, key):
+        if self._approval_paint_pending == key:
+            self._approval_paint_pending = None
+        if (key == self._shown_key and self.session.presented != key
+                and self._review_visible()):
+            self.session.mark_presented(*key)
+
+    def eventFilter(self, watched, event):
+        if watched is getattr(self, "approval_card", None) and event.type() == QEvent.Paint:
+            key = self._shown_key
+            if key and self.session.presented != key and self._approval_paint_pending != key:
+                self._approval_paint_pending = key
+                QTimer.singleShot(0, self, lambda: self._mark_painted(key))
+        return super().eventFilter(watched, event)
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if hasattr(self, "approval_card") and event.type() in (
+                QEvent.ActivationChange, QEvent.WindowStateChange):
+            if not self._review_visible():
+                self._forget_presentation()
+            self.approval_card.update()
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        if hasattr(self, "approval_card"):
+            self._forget_presentation()
+
+    def _forget_presentation(self):
+        self._pressed_approvals.clear()
+        self.session.presented = None
+        self._pending_physical = None
+        self._sync_link()
+
+    def nativeEvent(self, event_type, message):
+        if sys.platform == "win32":
+            from ctypes.wintypes import MSG
+            native = MSG.from_address(int(message))
+            if native.message == WM_WTSSESSION_CHANGE and hasattr(self, "approval_card"):
+                if native.wParam in SESSION_LOCKED:
+                    self._set_session_locked(True)
+                elif native.wParam in SESSION_UNLOCKED:
+                    self._set_session_locked(False)
+        return super().nativeEvent(event_type, message)
+
+    def _set_session_locked(self, locked):
+        self._session_locked = locked
+        if locked:
+            self._forget_presentation()
+        self.real_backend.set_session_locked(locked)
+        self.approval_card.update()
+        self.render()
+
+    def approve(self, choice, token, source="desktop", input_guard=None):
+        def still_visible():
+            return (token == self._shown_key and self._review_visible()
+                    and (input_guard is None or input_guard()))
+
+        if not token or not still_visible():
             return
-        changed = (self.real_backend.decide(choice, *token) if self.mode == "real"
-                   else self.session.decide(choice, *token))
+        changed = (self.real_backend.decide(choice, *token, source=source, guard=still_visible)
+                   if self.mode == "real" else self.session.decide(choice, *token))
         if changed:
             self._cue_event("declined" if choice == "decline" else "accepted")
             self._schedule_auto()
 
-    def press_virtual(self, index):
-        token = self._current_token()
-        if index in (0, 1, 2) and token:
-            if self.mode == "real":
-                choice = {0: "once", 1: "session", 2: "decline"}[index]
-                changed = self.real_backend.decide(choice, *token)
-            else:
-                changed = self.session.virtual_key(index, *token)
-        elif index == 3 and self.mode == "real":
-            changed = self.real_backend.cancel()
-        else:
-            changed = self.session.virtual_key(index)
-        if changed:
-            if index in (0, 1, 2):
-                self._cue_event("declined" if index == 2 else "accepted")
-            elif index == 3:
-                self._cue_event("cancelled")
-            self._schedule_auto()
+    def press_virtual(self, index, source="virtual key"):
+        if index in APPROVAL_KEYS:
+            self.approve(APPROVAL_KEYS[index], self._current_token(), source)
+        elif index == 3:
+            self.cancel_turn(source)
+        elif index == 4:
+            self.acknowledge()
 
-    def cancel_turn(self):
-        self._cue_event("cancelled")
+    def cancel_turn(self, source="desktop"):
         if self.mode == "real":
-            self.real_backend.cancel()
+            changed = self.real_backend.cancel(source=source)
         else:
-            self.session.cancel()
+            changed = self.session.cancel()
+        if changed:
+            self._cue_event("cancelled")
 
     def acknowledge(self):
         self.session.acknowledge()
@@ -416,6 +610,8 @@ class MainWindow(QMainWindow):
         self.send_button.setText(
             "▶  Send to Codex" if self.mode == "real" else "▶  Simulate turn")
         self.mode_picker.setEnabled(phase == Phase.IDLE)
+        if hasattr(self, "_cli_action"):
+            self._cli_action.setEnabled(phase == Phase.IDLE)
         self.scenario_picker.setEnabled(self.mode == "simulator" and phase == Phase.IDLE)
         self.auto_play.setEnabled(self.mode == "simulator")
         self.sandbox_picker.setEnabled(self.mode == "real" and phase == Phase.IDLE)
@@ -450,31 +646,31 @@ class MainWindow(QMainWindow):
         if request:
             key = (self.session.run_id, request.request_id)
             self.approval_kind.setText(f"{request.kind}    ·    ID: {request.request_id}")
-            self.approval_description.setText(request.description)
-            self.approval_command.setText(
-                f"Command: {request.command}" if request.command
-                else "No shell command — review the proposed file changes.")
+            if self.approval_description.toPlainText() != request.description:
+                self.approval_description.setPlainText(request.description)
+            command_preview = f"Command: {request.command}" if request.command else ""
+            if self.approval_command.toPlainText() != command_preview:
+                self.approval_command.setPlainText(command_preview)
+            self.approval_command.setVisible(bool(request.command))
             self.approval_cwd.setText(f"Working directory: {request.cwd}")
             self.approval_reason.setText(f"Reason: {request.reason}")
             if self._shown_key != key:
                 self._shown_key = key
-                # First allow the review card to enter the event loop. This
-                # prevents an event queued before it was shown from approving.
-                QTimer.singleShot(
-                    0, lambda run_id=key[0], request_id=key[1]:
-                    self.session.mark_presented(run_id, request_id))
-            actionable = self.session.presented == key
+                self._pressed_approvals.clear()
+                self.approval_card.update()
+            actionable = self.session.presented == key and self._review_visible()
             self.once_button.setEnabled(actionable and "once" in request.allowed)
             self.session_button.setEnabled(actionable and "session" in request.allowed)
             self.decline_button.setEnabled(actionable and "decline" in request.allowed)
         else:
             self._shown_key = None
+            self._pressed_approvals.clear()
 
         for i, key in self.virtual_buttons.items():
             if i in (0, 1, 2):
                 names = {0: "once", 1: "session", 2: "decline"}
                 enabled = bool(
-                    request and self.session.presented == self._shown_key
+                    request and actionable
                     and names[i] in request.allowed
                 )
             elif i == 3:
@@ -528,6 +724,7 @@ class MainWindow(QMainWindow):
         if self.keybow_server.running:
             self.keybow_server.close()
             self._physical_epoch = 0
+            self._physical_snapshot = False
             self._physical_held.clear()
             self._pending_physical = None
             self._ambiguous_chord = False
@@ -542,8 +739,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(
                 self, "Keybow Pi pairing",
                 f"Cannot start Pi link: {exc}\n\n"
-                "Create ~/.keybow2040/windows.json with the pairing utility. "
-                "See docs/keybow-pairing.md.")
+                "Use Settings → Set up Pi pairing. See Help for setup and troubleshooting.")
             return
         self._last_link_error = ""
         self.render()
@@ -557,6 +753,7 @@ class MainWindow(QMainWindow):
             kind = event[0]
             if kind == "connected" and self.keybow_server.running:
                 self._physical_epoch = event[1]
+                self._physical_snapshot = False
                 self._physical_held.clear()
                 self._pending_physical = None
                 self._ambiguous_chord = False
@@ -566,6 +763,7 @@ class MainWindow(QMainWindow):
                 self._cue_event("connected")
             elif kind == "disconnected" and event[1] == self._physical_epoch:
                 self._physical_epoch = 0
+                self._physical_snapshot = False
                 self._physical_held.clear()
                 self._pending_physical = None
                 self._ambiguous_chord = False
@@ -576,9 +774,12 @@ class MainWindow(QMainWindow):
                 self._last_link_error = event[1]
             elif kind == "snapshot" and event[1] == self._physical_epoch:
                 self._physical_held = set(event[2])
+                self._physical_snapshot = True
+                self._pending_physical = None
                 self._update_visual_holds()
-            elif kind == "key" and event[1] == self._physical_epoch:
-                _, _, index, pressed, arm = event
+            elif kind == "key" and self._physical_snapshot and event[1] == self._physical_epoch:
+                _, _, index, pressed, arm, *received = event
+                fresh = not received or time.monotonic() - received[0] <= 0.75
                 if (index in self._physical_held) == pressed:
                     continue  # duplicate/repeated edge, never another decision
                 if pressed:
@@ -594,13 +795,12 @@ class MainWindow(QMainWindow):
                 if index in (0, 1, 2):
                     identity = self._physical_arm_identity
                     valid = (
-                        self.keybow_server.connected and identity is not None
+                        fresh and self._live_pi() and identity is not None
                         and arm is not None and arm == self._physical_arm
                         and identity[:2] == self._shown_key
                         and identity[2] == self._physical_epoch
                         and self.session.presented == self._shown_key
-                        and self.isVisible() and not self.isMinimized()
-                        and self.isActiveWindow()
+                        and self._review_visible()
                     )
                     if (self._pending_physical is not None or
                             len(self._physical_held & {0, 1, 2}) > 1):
@@ -611,12 +811,17 @@ class MainWindow(QMainWindow):
                     elif valid and not self._ambiguous_chord:
                         self._pending_physical = (
                             index, arm, identity, time.monotonic())
-                elif index == 3:
+                elif index == 3 and fresh and self._live_pi() and not self._session_locked:
                     self._pending_physical = None  # cancel takes precedence
-                    self.press_virtual(index)
-                elif index == 4:
-                    self.press_virtual(index)
-        self._commit_physical_pending()
+                    self.press_virtual(index, source="Pi")
+                elif index == 4 and fresh and self._live_pi() and not self._session_locked:
+                    self.press_virtual(index, source="Pi")
+        if self.keybow_server.events.empty():
+            self._commit_physical_pending()
+        elif self._pending_physical is not None:
+            self._pending_physical = None
+        if self._shown_key and self.session.presented and not self._review_visible():
+            self._forget_presentation()
         self._sync_link()
         if hasattr(self, "device_status"):
             if not self.keybow_server.running:
@@ -634,22 +839,25 @@ class MainWindow(QMainWindow):
                 else "Enable physical Pi link")
 
 
+    def _live_pi(self):
+        return (self._physical_snapshot and self.keybow_server.connected
+                and self.keybow_server.connection_epoch == self._physical_epoch)
+
     def _commit_physical_pending(self):
         candidate = self._pending_physical
         if candidate is None or time.monotonic() - candidate[3] < 0.09:
             return
         self._pending_physical = None
-        index, arm, identity, _started = candidate
-        if (not self._ambiguous_chord and
-                self.keybow_server.connected and
-                identity == self._physical_arm_identity and
-                arm == self._physical_arm and
-                self.session.presented == self._shown_key and
-                self.session.phase == Phase.APPROVAL and
-                len(self._physical_held & {0, 1, 2}) <= 1 and
-                self.isVisible() and not self.isMinimized() and
-                self.isActiveWindow()):
-            self.press_virtual(index)
+        index, arm, identity, started = candidate
+
+        def still_armed():
+            return (not self._ambiguous_chord and time.monotonic() - started <= 0.75
+                    and self._live_pi() and self.keybow_server.events.empty()
+                    and identity == self._physical_arm_identity and arm == self._physical_arm
+                    and self.session.presented == self._shown_key
+                    and len(self._physical_held & APPROVAL_KEYS.keys()) <= 1)
+
+        self.approve(APPROVAL_KEYS[index], identity[:2], source="Pi", input_guard=still_armed)
 
     def _sync_link(self):
         if not self.keybow_server.running:
@@ -657,20 +865,22 @@ class MainWindow(QMainWindow):
         # Hardware approval is only armed after a foreground review card is
         # both visible and marked presented. Blur/minimize/disconnect disarms.
         identity = None
-        if (self._physical_epoch and self.keybow_server.connected
+        if (self._live_pi()
                 and self.session.phase == Phase.APPROVAL
                 and self._shown_key is not None
                 and self.session.presented == self._shown_key
-                and self.isVisible() and not self.isMinimized()
-                and self.isActiveWindow()):
+                and self._review_visible()):
             identity = (*self._shown_key, self._physical_epoch)
         if identity != self._physical_arm_identity:
             self._pending_physical = None
             self._ambiguous_chord = False
             self._physical_arm_identity = identity
             self._physical_arm = secrets.token_hex(16) if identity else None
+        phase = self._phase_name()
+        if phase == "approval" and self._physical_arm is None:
+            phase = "working"
         self.keybow_server.publish(
-            self._phase_name(), arm=self._physical_arm,
+            phase, arm=self._physical_arm,
             cue=self._cue, cue_id=self._cue_id)
 
     def paint_leds(self):
@@ -691,16 +901,23 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         self.keybow_server.close()
         self.real_backend.close()
+        if self._window_session:
+            self._window_session.close()
         if self._tray:
             self._tray.hide()
         super().closeEvent(event)
 
 
 def main():
-    app = QApplication(sys.argv)
+    smoke_test = sys.argv[1:] == ["--smoke-test"]
+    app = QApplication(sys.argv[:1] if smoke_test else sys.argv)
     app.setApplicationName("Keybow Codex Desktop")
-    window = MainWindow()
+    window = MainWindow(
+        audit=None if smoke_test else ApprovalAudit(),
+        settings_file=None if smoke_test else SETTINGS_FILE)
     window.show()
+    if smoke_test:
+        QTimer.singleShot(0, window, window.close)
     return app.exec()
 
 

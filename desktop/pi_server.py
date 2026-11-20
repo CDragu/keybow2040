@@ -8,7 +8,8 @@ import socket
 import threading
 import time
 
-from keybow_net.pairing import WINDOWS_CONFIG, load_config
+from desktop.settings import load_windows_pairing
+from keybow_net.pairing import WINDOWS_CONFIG
 from keybow_net.protocol import (
     HEARTBEAT_INTERVAL, ProtocolError, server_handshake
 )
@@ -28,14 +29,21 @@ class KeybowServer:
         self.connected = False
         self.running = False
 
+    @property
+    def connection_epoch(self):
+        return self._epoch if self.connected and not self._stop.is_set() else 0
+
     def start(self):
         if self.running:
             return
-        host, port, secret = load_config(self.config, server=True)
+        host, port, secret = load_windows_pairing(self.config)
         # Bind before starting thread to surface port/firewall errors in UI.
         listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
+            if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+                listener.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            else:
+                listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             listener.bind((host, port))
             listener.listen(1)
             listener.settimeout(0.25)
@@ -121,7 +129,7 @@ class KeybowServer:
                             (arm is not None and (not isinstance(arm, str) or
                                                   len(arm) > 80))):
                         raise ProtocolError("Invalid key event.")
-                    self._emit(("key", epoch, index, pressed, arm))
+                    self._emit(("key", epoch, index, pressed, arm, time.monotonic()))
                 elif kind == "snapshot":
                     keys = body.get("held")
                     if (not isinstance(keys, list) or len(keys) > 12 or

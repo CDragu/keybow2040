@@ -1,1 +1,1 @@
-"""Windows Keybow/Codex companion prototype (offline simulation only)."""
+"""Windows Keybow Codex desktop companion."""

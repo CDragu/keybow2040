@@ -1,6 +1,6 @@
 # Windows Keybow Codex Controller — desktop application plan
 
-Status: **D0 and D1 implemented, D2 Pi connectivity and shared RGB effects implemented**. [Windows desktop setup](../desktop/README.md), [D2 pairing](keybow-pairing.md). D1 requires validation on a logged-in Windows Codex CLI, and D2 requires physical Pi/Windows LAN testing. Hardware diagnostic lives at
+Status: **D0–D4 implemented in code**. See [Windows installation and supervised testing](../desktop/README.md) and [Pi pairing](keybow-pairing.md). Live acceptance requires a logged-in Windows Codex CLI and a physical Keybow on a Windows/Pi LAN. The hardware diagnostic lives at
 [`pi/`](../pi/README.md). The new target is the original **12-key Keybow with
 Pi Zero WH**, replacing the 16-key CircuitPython assumptions in
 [`keybow-codex-mvp.txt`](../keybow-codex-mvp.txt).
@@ -171,6 +171,7 @@ schema from the installed CLI and pin the tested version).
 
 - Approval gate, visible-prompt-only decisions, session approval only when
   explicitly available, audit log, Windows lock behaviour.
+- The desktop writes the request binding and decision source to a local SQLite audit. A request expires after two minutes. Lock declines the outstanding real request. Pi disconnect clears the device arm and the still-current request remains available for desktop review.
 - **Done when:** multiple sequential requests, stale presses, missed release,
   disconnect during approval, process restart and cancellation cannot lead to
   the wrong request being approved.
@@ -179,6 +180,7 @@ schema from the installed CLI and pin the tested version).
 
 - Installer, startup option, Windows firewall setup, signed/explained builds,
   configuration migration and troubleshooting guide.
+- The per-user x64 installer bundles Python and Qt, with opt-in launch at sign-in. The desktop migrates existing Windows pairing keys to per-user DPAPI protection. CI emits an unsigned installer and SHA-256 checksum. Codex CLI is a separately installed prerequisite.
 - **Done when:** clean Windows install can pair the Keybow and complete a
   supervised Codex task without a developer console.
 

@@ -6,3 +6,5 @@ recordings/
 .venv-desktop/
 .keybow2040/
 pi-pairing.json
+/build/
+/dist/

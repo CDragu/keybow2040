@@ -1,4 +1,4 @@
-> **Original 12-key Pi Zero WH Keybow / Windows Codex controller:** D2 adds an [authenticated Pi–Windows link, key chords and RGB effects](docs/keybow-pairing.md). The [Windows desktop app](desktop/README.md) supports both simulated and real Codex. The original 16-key Keybow 2040 firmware, macOS switcher and audio looper remain separate. Physical Pi/Windows network testing is still required.
+> **Original 12-key Pi Zero WH Keybow / Windows Codex controller:** see the [Windows installer and desktop guide](desktop/README.md) and [authenticated Pi pairing and RGB effects](docs/keybow-pairing.md). The app supports simulated and real Codex, foreground approval controls, and a local audit log. Live Windows/Pi validation is still required.
 
 # Keybow 2040 AI session switcher (and live looper)
 
