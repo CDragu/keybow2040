@@ -77,8 +77,8 @@ def windows_control(action):
         return "Opened Spotify."
     # These imports are Windows-only. Explicit MTA initialization also allows
     # Core Audio and WinRT to coexist on the worker regardless of import order.
-    from winrt.runtime import init_apartment, uninit_apartment
-    init_apartment()
+    from winrt.runtime import ApartmentType, init_apartment, uninit_apartment
+    init_apartment(ApartmentType.MULTI_THREADED)
     try:
         if action in PLAYBACK_METHODS or action == "check":
             from winrt.windows.media.control import GlobalSystemMediaTransportControlsSessionManager
