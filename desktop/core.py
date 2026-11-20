@@ -4,6 +4,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Callable, Optional
 
+from desktop.spotify import SPOTIFY_KEYS
+
 
 class Phase(str, Enum):
     IDLE = "Idle"
@@ -34,6 +36,7 @@ class Led:
 KEY_LABELS = {
     0: "Approve once", 1: "Approve session", 2: "Decline",
     3: "Cancel turn", 4: "Acknowledge",
+    **{index: label for index, (_, label) in SPOTIFY_KEYS.items()},
 }
 TERMINAL = (Phase.COMPLETED, Phase.FAILED, Phase.CANCELLED)
 APPROVAL_CHOICES = {"once", "session", "decline"}

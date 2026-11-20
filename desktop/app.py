@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QFileDialog, QFrame,
     QGridLayout, QHBoxLayout, QInputDialog, QLabel, QListWidget, QMainWindow,
     QMenu, QMessageBox, QPlainTextEdit, QPushButton, QSystemTrayIcon, QVBoxLayout,
-    QWidget,
+    QScrollArea, QWidget,
 )
 
 from desktop.audit import ApprovalAudit
@@ -27,6 +27,7 @@ from desktop.windows_session import (
 from desktop.core import KEY_LABELS, TERMINAL, Phase, SessionController
 from desktop.codex_backend import CodexBackend
 from desktop.simulator import SCENARIOS, SimulatedCodex
+from desktop.spotify import SPOTIFY_KEYS, SpotifyController, windows_control
 from desktop.pi_server import KeybowServer
 from keybow_net.effects import LightEngine
 from keybow_net.pairing import CONFIG_DIR
@@ -90,10 +91,11 @@ def button(text, style=None):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, *, audit=None, settings_file=None):
+    def __init__(self, *, audit=None, settings_file=None, spotify=None):
         super().__init__()
         self._window_session = None
         self._session_locked = False
+        self.spotify = spotify if spotify is not None else SpotifyController()
         self._approval_paint_pending = None
         self._pressed_approvals = {}
         self._settings_file = settings_file
@@ -155,7 +157,11 @@ class MainWindow(QMainWindow):
 
     def _build(self):
         root = QWidget()
-        self.setCentralWidget(root)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setWidget(root)
+        self.setCentralWidget(scroll)
         outer = QVBoxLayout(root)
         outer.setContentsMargins(22, 20, 22, 20)
         outer.setSpacing(16)
@@ -327,6 +333,18 @@ class MainWindow(QMainWindow):
         self.link_button.clicked.connect(self.toggle_pi_link)
         device_layout.addWidget(self.link_button)
         right.addWidget(device_card)
+
+        spotify_card, spotify_layout = card()
+        spotify_layout.addWidget(label("SPOTIFY", "section"))
+        spotify_layout.addWidget(label(
+            "Keys 5–7: previous / play-pause / next\n"
+            "Keys 8–10: volume − / volume + / mute\n"
+            "Key 11: open Spotify", "muted"))
+        self.spotify_status = label(
+            "Live controls in both Codex modes, including while Keybow is in the background."
+            if self.spotify.supported else "Spotify controls require Windows.", "muted")
+        spotify_layout.addWidget(self.spotify_status)
+        right.addWidget(spotify_card)
 
         guide_card, guide_layout = card()
         guide_layout.addWidget(label("HOW TO TEST", "section"))
@@ -578,7 +596,10 @@ class MainWindow(QMainWindow):
             self._schedule_auto()
 
     def press_virtual(self, index, source="virtual key"):
-        if index in APPROVAL_KEYS:
+        if index in SPOTIFY_KEYS:
+            if not self._session_locked and self.spotify.submit(index):
+                self.spotify_status.setText(f"Sending: {SPOTIFY_KEYS[index][1]}…")
+        elif index in APPROVAL_KEYS:
             self.approve(APPROVAL_KEYS[index], self._current_token(), source)
         elif index == 3:
             self.cancel_turn(source)
@@ -677,6 +698,8 @@ class MainWindow(QMainWindow):
                 enabled = phase in (Phase.WORKING, Phase.APPROVAL)
             elif i == 4:
                 enabled = phase in TERMINAL
+            elif i in SPOTIFY_KEYS:
+                enabled = self.spotify.supported and not self._session_locked
             else:
                 enabled = False
             key.setEnabled(enabled)
@@ -745,6 +768,8 @@ class MainWindow(QMainWindow):
         self.render()
 
     def _poll_link(self):
+        for message in self.spotify.poll():
+            self.spotify_status.setText(message)
         for _ in range(256):
             try:
                 event = self.keybow_server.events.get_nowait()
@@ -815,6 +840,8 @@ class MainWindow(QMainWindow):
                     self._pending_physical = None  # cancel takes precedence
                     self.press_virtual(index, source="Pi")
                 elif index == 4 and fresh and self._live_pi() and not self._session_locked:
+                    self.press_virtual(index, source="Pi")
+                elif index in SPOTIFY_KEYS and fresh and self._live_pi() and not self._session_locked:
                     self.press_virtual(index, source="Pi")
         if self.keybow_server.events.empty():
             self._commit_physical_pending()
@@ -899,6 +926,7 @@ class MainWindow(QMainWindow):
             )
 
     def closeEvent(self, event):
+        self.spotify.close()
         self.keybow_server.close()
         self.real_backend.close()
         if self._window_session:
@@ -910,6 +938,11 @@ class MainWindow(QMainWindow):
 
 def main():
     smoke_test = sys.argv[1:] == ["--smoke-test"]
+    if smoke_test and sys.platform == "win32":
+        # Also check the frozen package's WinRT/COM imports; never send a control.
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=1) as worker:
+            worker.submit(windows_control, "check").result(timeout=8)
     app = QApplication(sys.argv[:1] if smoke_test else sys.argv)
     app.setApplicationName("Keybow Codex Desktop")
     window = MainWindow(

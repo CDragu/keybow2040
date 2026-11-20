@@ -29,6 +29,7 @@ Push-Location $Repo
 try {
     $PyInstallerArgs = @(
         '--noconfirm', '--clean', '--onedir', '--windowed', '--name', 'KeybowCodex',
+        '--collect-submodules', 'winrt', '--collect-submodules', 'comtypes',
         '--workpath', $Build, '--specpath', $Build, '--distpath', $Dist, 'desktop\__main__.py'
     )
     python -m PyInstaller @PyInstallerArgs

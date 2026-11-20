@@ -4,6 +4,39 @@ Keybow Codex is a Windows desktop app for the original 12-key Keybow on a Pi
 Zero WH. It includes a virtual keypad, an offline simulator, and a connection to
 the local Codex CLI.
 
+## Spotify controls
+
+The spare keys control the **Spotify desktop app on Windows** through both the
+virtual keypad and the paired Pi. Keep the Keybow desktop running; physical
+Spotify keys also work when its window is in the background or hidden to the tray.
+
+| Key | Action |
+| --- | --- |
+| 5 | Previous track |
+| 6 | Play / pause |
+| 7 | Next track |
+| 8 | Spotify volume down 5 percentage points |
+| 9 | Spotify volume up 5 percentage points |
+| 10 | Mute / unmute Spotify |
+| 11 | Open Spotify |
+
+Install and sign in to Spotify, then play a track once to make its Windows media
+session available. No Spotify developer account, Web API token, or Premium API
+integration is needed. These keys send live Spotify controls in **both Simulator
+and Real Codex modes**. Keys 0–4 keep their existing Codex actions.
+
+Playback selects Spotify's desktop media session instead of sending global media
+keys. Volume and mute change Spotify's Windows mixer sessions on the default
+output device; other apps and the master volume are unaffected. They control local
+playback on this PC, not a remote Spotify Connect device or the browser player.
+If volume is zero or muted in Spotify itself, raise its in-app slider as well.
+
+Commands run on a background worker. The Spotify panel reports missing sessions,
+rejected commands, or timeouts. Wait for a command to finish before pressing again;
+additional presses while it is busy are ignored. Repeated held-key events and stale
+Pi events do not repeat actions. Windows lock blocks new Spotify actions. These
+controls are unavailable on Linux/macOS, where Codex simulation remains usable.
+
 ## Install on Windows
 
 1. In [Windows desktop installer runs](https://github.com/CDragu/keybow2040/actions/workflows/windows-installer.yml), choose a successful run for the branch or revision you want. Download and unzip **Keybow-Codex-Windows-x64-unsigned**.
@@ -85,5 +118,13 @@ acceptance, run a live Codex turn from the Start menu on a clean Windows PC.
 Exercise two distinct requests, decline one, approve the other after reviewing
 it, and check the audit. Repeat with the Pi unplugged, Windows locked, a held key
 across reconnect, and Codex stopped midway through a request.
+
+Spotify tests use fake players for routing and failure cases. Windows tests and
+the installed-package smoke test also enumerate native media sessions and initialize Core Audio
+without changing playback. For live acceptance, play Spotify alongside another
+player, hide Keybow, and exercise keys 5–11 on the Pi. Confirm only Spotify changes,
+test volume at 0% and 100%, mute twice, then close Spotify and check the error shown
+in the Spotify panel. Reconnect with a Spotify key held and verify no action until
+it is released and pressed again.
 
 Reference: [Codex App Server protocol](https://learn.chatgpt.com/docs/app-server).
