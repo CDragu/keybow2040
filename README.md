@@ -1,4 +1,4 @@
-> **Original 12-key Pi Zero WH Keybow / Windows Codex controller:** see the [Windows installer and desktop guide](desktop/README.md) and [authenticated Pi pairing and RGB effects](docs/keybow-pairing.md). The app supports simulated and real Codex, foreground approval controls, and a local audit log. Live Windows/Pi validation is still required.
+> **Original 12-key Pi Zero WH Keybow / Windows Codex controller:** see the [Windows installer and desktop guide](desktop/README.md), [Spotify controls on keys 5–11](desktop/README.md#spotify-controls), and [authenticated Pi pairing and RGB effects](docs/keybow-pairing.md). The app supports simulated and real Codex, foreground approval controls, and a local audit log. Live Windows/Pi validation is still required.
 
 # Keybow 2040 AI session switcher (and live looper)
 
